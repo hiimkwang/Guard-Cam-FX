@@ -4,6 +4,7 @@ import com.google.zxing.BinaryBitmap;
 import com.google.zxing.DecodeHintType;
 import com.google.zxing.MultiFormatReader;
 import com.google.zxing.Result;
+import com.google.zxing.ResultPoint;
 import com.google.zxing.client.j2se.BufferedImageLuminanceSource;
 import com.google.zxing.common.HybridBinarizer;
 import javafx.application.Application;
@@ -22,7 +23,7 @@ import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
 import javafx.stage.Stage;
-import javafx.util.Duration; // Thêm thư viện xử lý thời gian Media
+import javafx.util.Duration;
 import org.bytedeco.javacv.*;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.opencv.global.opencv_imgproc;
@@ -30,6 +31,9 @@ import org.bytedeco.opencv.opencv_core.Mat;
 import org.bytedeco.opencv.opencv_core.Point;
 import org.bytedeco.opencv.opencv_core.Scalar;
 
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.SourceDataLine;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.text.SimpleDateFormat;
@@ -54,21 +58,17 @@ public class GuardCamApp extends Application {
     // --- CÁC BIẾN GIAO DIỆN MAIN VIEW (GIỮA) ---
     private StackPane mainCenterPane;
 
-    // 1. Giao diện Live Camera
     private StackPane liveViewPane;
     private ImageView cameraView;
     private StackPane aimBox;
     private Label overlayText;
 
-    // 2. Giao diện Playback Video
     private StackPane playbackPane;
     private MediaView searchMediaView;
     private MediaPlayer searchMediaPlayer;
     private Label pbTitle, pbTime, pbShipper, pbSize;
     private Hyperlink pbPathLink;
     private Button closePlaybackBtn;
-
-    // Các biến cho Thanh điều khiển Video (Control Bar)
     private Button playPauseBtn;
     private Slider timeSlider;
     private Label timeLabel;
@@ -87,17 +87,21 @@ public class GuardCamApp extends Application {
     private volatile boolean isUiUpdating = false;
     private String currentTrackingCode = "";
     private int frameCount = 0;
-    private long recordingStartTime = 0;
+
+    private long firstVideoTimestamp = -1;
     private SimpleDateFormat videoTimeFormat = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss");
+
+    // BIẾN LƯU TỌA ĐỘ VẼ KHUNG FOCUS
+    private volatile Point[] lastDetectedPoints = null;
+    private volatile long lastDetectionTime = 0;
 
     private final Object recorderLock = new Object();
     private ExecutorService aiScannerThread = Executors.newSingleThreadExecutor();
 
     // ĐƯỜNG DẪN LƯU VIDEO
-    private final String SAVE_DIR = "E:\\Quang Workspace\\GuardCam FX\\videos\\";
+    private final String SAVE_DIR = "D:\\Quang-Wordspace\\Guard-Cam-FX\\videos\\";
 
     public static void main(String[] args) {
-        // Tắt log vàng rác của FFmpeg
         org.bytedeco.ffmpeg.global.avutil.av_log_set_level(org.bytedeco.ffmpeg.global.avutil.AV_LOG_ERROR);
         launch(args);
     }
@@ -109,9 +113,7 @@ public class GuardCamApp extends Application {
         BorderPane root = new BorderPane();
         root.setStyle("-fx-background-color: #0f172a; -fx-font-family: 'Segoe UI';");
 
-        // ==========================================
-        // SIDEBAR (CỘT TRÁI)
-        // ==========================================
+        // SIDEBAR
         VBox sidebar = new VBox(15);
         sidebar.setPadding(new Insets(20));
         sidebar.setStyle("-fx-background-color: #1e293b; -fx-border-color: #475569; -fx-border-width: 0 1 0 0;");
@@ -221,18 +223,14 @@ public class GuardCamApp extends Application {
         scrollSidebar.setPrefWidth(380);
         scrollSidebar.setStyle("-fx-background-color: #1e293b; -fx-background: #1e293b; -fx-padding: 0;");
 
-
-        // ==========================================
-        // MAIN CENTER VIEW (GIỮA) - ĐÃ FIX MẤT GÓC
-        // ==========================================
+        // MAIN CENTER VIEW
         mainCenterPane = new StackPane();
         mainCenterPane.setStyle("-fx-background-color: #000000;");
-        mainCenterPane.setMinSize(0, 0); // FIX: Ép khu vực giữa cho phép co giãn
+        mainCenterPane.setMinSize(0, 0);
 
-        // --- LAYER 1: LIVE CAMERA ---
         liveViewPane = new StackPane();
         liveViewPane.setPadding(new Insets(20));
-        liveViewPane.setMinSize(0, 0); // FIX: Tước bỏ sự cứng đầu của ImageView, cho phép thu nhỏ
+        liveViewPane.setMinSize(0, 0);
 
         cameraView = new ImageView();
         cameraView.setPreserveRatio(true);
@@ -240,8 +238,8 @@ public class GuardCamApp extends Application {
         cameraView.fitHeightProperty().bind(liveViewPane.heightProperty().subtract(40));
 
         aimBox = new StackPane();
-        aimBox.setMaxSize(400, 250);
-        aimBox.setStyle("-fx-border-color: #10b981; -fx-border-width: 3; -fx-border-radius: 10; -fx-background-color: transparent;");
+        aimBox.setMaxSize(450, 280);
+        aimBox.setStyle("-fx-border-color: rgba(16, 185, 129, 0.5); -fx-border-width: 3; -fx-border-radius: 10; -fx-background-color: transparent;");
         aimBox.setVisible(false);
 
         overlayText = new Label("HÃY BẬT CAMERA");
@@ -251,31 +249,32 @@ public class GuardCamApp extends Application {
 
         liveViewPane.getChildren().addAll(cameraView, aimBox, overlayText);
 
-        // --- LAYER 2: PLAYBACK VIDEO CÓ THANH ĐIỀU KHIỂN ---
+        // ==========================================
+        // LÀM LẠI GIAO DIỆN PLAYBACK ĐÚNG Ý (CHỐNG ĐÈ 100%)
+        // ==========================================
         playbackPane = new StackPane();
         playbackPane.setStyle("-fx-background-color: rgba(15, 23, 42, 0.95);");
         playbackPane.setVisible(false);
 
-        // Khung chứa Video + Thanh điều khiển
+        // Gom tất cả vào 1 cột dọc (VBox) để chúng tự đẩy nhau, tuyệt đối không đè nhau
         VBox playerContainer = new VBox(15);
         playerContainer.setAlignment(Pos.CENTER);
-        playerContainer.setPadding(new Insets(20, 20, 180, 20)); // Để lại khoảng trống bên dưới cho hộp Meta
+        playerContainer.setPadding(new Insets(20));
 
         searchMediaView = new MediaView();
         searchMediaView.setPreserveRatio(true);
-        // Trừ hao chiều cao để chừa chỗ cho thanh điều khiển
         searchMediaView.fitWidthProperty().bind(playbackPane.widthProperty().subtract(100));
-        searchMediaView.fitHeightProperty().bind(playbackPane.heightProperty().subtract(250));
+        // Trừ hao 300px chiều cao cho thanh điều khiển và bảng thông tin
+        searchMediaView.fitHeightProperty().bind(playbackPane.heightProperty().subtract(300));
 
-        // THANH ĐIỀU KHIỂN (Media Controls)
         HBox controlBar = new HBox(15);
         controlBar.setAlignment(Pos.CENTER);
         controlBar.setPadding(new Insets(10, 20, 10, 20));
-        controlBar.setStyle("-fx-background-color: rgba(30, 41, 59, 0.9); -fx-border-radius: 8px; -fx-border-color: #475569;");
+        controlBar.setStyle("-fx-background-color: #1e293b; -fx-border-radius: 8px; -fx-border-color: #475569;");
         controlBar.setMaxWidth(800);
 
         playPauseBtn = new Button("⏸ Tạm dừng");
-        playPauseBtn.setStyle("-fx-background-color: #3b82f6; -fx-text-fill: white; -fx-font-weight: bold; -fx-pref-width: 100px;");
+        playPauseBtn.setStyle("-fx-background-color: #3b82f6; -fx-text-fill: white; -fx-font-weight: bold; -fx-pref-width: 100px; -fx-cursor: hand;");
         playPauseBtn.setOnAction(e -> {
             if (searchMediaPlayer == null) return;
             if (searchMediaPlayer.getStatus() == MediaPlayer.Status.PLAYING) {
@@ -288,9 +287,8 @@ public class GuardCamApp extends Application {
         });
 
         timeSlider = new Slider();
-        HBox.setHgrow(timeSlider, Priority.ALWAYS); // Ép thanh slider dãn hết mức có thể
+        HBox.setHgrow(timeSlider, Priority.ALWAYS);
 
-        // Sự kiện khi người dùng chủ động kéo thanh thời gian
         timeSlider.valueChangingProperty().addListener((obs, wasChanging, isChanging) -> {
             if (!isChanging && searchMediaPlayer != null) {
                 searchMediaPlayer.seek(Duration.seconds(timeSlider.getValue()));
@@ -307,17 +305,11 @@ public class GuardCamApp extends Application {
         timeLabel.setFont(Font.font("System", FontWeight.BOLD, 13));
 
         controlBar.getChildren().addAll(playPauseBtn, timeSlider, timeLabel);
-
-        // Bấm thẳng vào video cũng Pause/Play được
         searchMediaView.setOnMouseClicked(e -> playPauseBtn.fire());
 
-        playerContainer.getChildren().addAll(searchMediaView, controlBar);
-
-        // HỘP THÔNG TIN (Metadata Box) nổi bên dưới
         VBox pbMetaBox = new VBox(8);
-        pbMetaBox.setMaxWidth(650);
-        pbMetaBox.setMaxHeight(150);
-        pbMetaBox.setStyle("-fx-background-color: rgba(30, 41, 59, 0.85); -fx-padding: 20px; -fx-border-radius: 12px; -fx-border-color: #475569;");
+        pbMetaBox.setMaxWidth(800);
+        pbMetaBox.setStyle("-fx-background-color: #1e293b; -fx-padding: 20px; -fx-border-radius: 12px; -fx-border-color: #475569;");
 
         pbTitle = new Label("MÃ ĐƠN: ---");
         pbTitle.setFont(Font.font("System", FontWeight.BOLD, 22));
@@ -344,16 +336,18 @@ public class GuardCamApp extends Application {
         pathBox.getChildren().addAll(pbl, pbPathLink);
 
         pbMetaBox.getChildren().addAll(pbTitle, pbTime, pbShipper, pbSize, pathBox);
-        StackPane.setAlignment(pbMetaBox, Pos.BOTTOM_CENTER);
-        StackPane.setMargin(pbMetaBox, new Insets(0, 0, 20, 0));
 
+        // GOM VÀO VBOX ĐỂ TỰ ĐẨY NHAU (Chống đè 100%)
+        playerContainer.getChildren().addAll(searchMediaView, controlBar, pbMetaBox);
+
+        // Nút Đóng lơ lửng góc phải trên
         closePlaybackBtn = new Button("❌ Đóng Video (Quay lại Live)");
-        closePlaybackBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10 20; -fx-background-radius: 6px; -fx-font-size: 14px;");
+        closePlaybackBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10 20; -fx-background-radius: 6px; -fx-font-size: 14px; -fx-cursor: hand;");
         closePlaybackBtn.setOnAction(e -> closePlaybackMode());
         StackPane.setAlignment(closePlaybackBtn, Pos.TOP_RIGHT);
         StackPane.setMargin(closePlaybackBtn, new Insets(20));
 
-        playbackPane.getChildren().addAll(playerContainer, pbMetaBox, closePlaybackBtn);
+        playbackPane.getChildren().addAll(playerContainer, closePlaybackBtn);
 
         mainCenterPane.getChildren().addAll(liveViewPane, playbackPane);
 
@@ -390,16 +384,50 @@ public class GuardCamApp extends Application {
         barcodeReader = new MultiFormatReader();
         Map<DecodeHintType, Object> hints = new EnumMap<>(DecodeHintType.class);
         hints.put(DecodeHintType.TRY_HARDER, Boolean.TRUE);
-        hints.put(DecodeHintType.POSSIBLE_FORMATS, Collections.singletonList(com.google.zxing.BarcodeFormat.CODE_128));
+        hints.put(DecodeHintType.POSSIBLE_FORMATS, java.util.Arrays.asList(
+                com.google.zxing.BarcodeFormat.CODE_128,
+                com.google.zxing.BarcodeFormat.QR_CODE
+        ));
         barcodeReader.setHints(hints);
         new File(SAVE_DIR).mkdirs();
+    }
+
+    // ==========================================
+    // FIX: TẠO TIẾNG BÍP XỊN, ÊM TAI HƠN
+    // ==========================================
+    private void playScannerBeep() {
+        new Thread(() -> {
+            try {
+                int sampleRate = 8000;
+                double freq = 1800d; // Hạ tần số xuống 1800Hz cho đầm tay giống súng quét thật
+                byte[] buf = new byte[800]; // Kêu cực nhanh (100ms)
+                AudioFormat af = new AudioFormat(sampleRate, 8, 1, true, false);
+                SourceDataLine sdl = AudioSystem.getSourceDataLine(af);
+                sdl.open(af);
+                sdl.start();
+                for (int i = 0; i < buf.length; i++) {
+                    double angle = i / (sampleRate / freq) * 2.0 * Math.PI;
+                    double volume = 127.0;
+                    // Đã thêm Fade-out: Âm lượng giảm dần mượt mà ở cuối để triệt tiêu tiếng lộp bộp của loa
+                    if (i > buf.length - 200) {
+                        volume = 127.0 * ((buf.length - i) / 200.0);
+                    }
+                    buf[i] = (byte) (Math.sin(angle) * volume);
+                }
+                sdl.write(buf, 0, buf.length);
+                sdl.drain();
+                sdl.stop();
+                sdl.close();
+            } catch (Exception e) {
+            }
+        }).start();
     }
 
     private void toggleSystem() {
         if (isSystemRunning) {
             stopCameraOnly();
             startCamBtn.setText("▶ BẬT HỆ THỐNG");
-            startCamBtn.setStyle("-fx-background-color: #3b82f6; -fx-text-fill: white; -fx-font-weight: bold;");
+            startCamBtn.setStyle("-fx-background-color: #3b82f6; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 12px; -fx-background-radius: 6px;");
             statusText.setText("CHƯA KẾT NỐI");
             statusText.setTextFill(Color.web("#a6adc8"));
             cameraView.setImage(null);
@@ -410,7 +438,7 @@ public class GuardCamApp extends Application {
         } else {
             startCameraThread();
             startCamBtn.setText("⏹ TẮT HỆ THỐNG");
-            startCamBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold;");
+            startCamBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 12px; -fx-background-radius: 6px;");
             statusText.setText("SẴN SÀNG QUÉT MÃ");
             statusText.setTextFill(Color.web("#10b981"));
             overlayText.setText("SẴN SÀNG");
@@ -446,20 +474,59 @@ public class GuardCamApp extends Application {
                     if (frame == null) continue;
                     frameCount++;
 
-                    Mat mat = matConverter.convert(frame);
+                    Mat recordMat = matConverter.convert(frame).clone();
+                    Mat displayMat = recordMat.clone();
+
                     String timeText = videoTimeFormat.format(new Date());
-                    opencv_imgproc.putText(mat, timeText, new Point(20, 50), opencv_imgproc.FONT_HERSHEY_SIMPLEX, 1.2, new Scalar(0, 255, 255, 0), 2, opencv_imgproc.LINE_AA, false);
+                    opencv_imgproc.putText(recordMat, timeText, new Point(20, 50), opencv_imgproc.FONT_HERSHEY_SIMPLEX, 1.2, new Scalar(0, 255, 255, 0), 2, opencv_imgproc.LINE_AA, false);
+                    opencv_imgproc.putText(displayMat, timeText, new Point(20, 50), opencv_imgproc.FONT_HERSHEY_SIMPLEX, 1.2, new Scalar(0, 255, 255, 0), 2, opencv_imgproc.LINE_AA, false);
+
                     if (isRecording && !currentTrackingCode.isEmpty()) {
-                        opencv_imgproc.putText(mat, "ORDER: " + currentTrackingCode, new Point(20, 100), opencv_imgproc.FONT_HERSHEY_SIMPLEX, 1.0, new Scalar(0, 0, 255, 0), 2, opencv_imgproc.LINE_AA, false);
+                        opencv_imgproc.putText(recordMat, "ORDER: " + currentTrackingCode, new Point(20, 100), opencv_imgproc.FONT_HERSHEY_SIMPLEX, 1.0, new Scalar(0, 0, 255, 0), 2, opencv_imgproc.LINE_AA, false);
+                        opencv_imgproc.putText(displayMat, "ORDER: " + currentTrackingCode, new Point(20, 100), opencv_imgproc.FONT_HERSHEY_SIMPLEX, 1.0, new Scalar(0, 0, 255, 0), 2, opencv_imgproc.LINE_AA, false);
                     }
-                    Frame processedFrame = matConverter.convert(mat);
+
+                    // FIX: VẼ KHUNG CHỮ NHẬT VUÔNG VỨC CHO MÃ VẠCH (Không còn trò vẽ tam giác lởm nữa)
+                    if (lastDetectedPoints != null && (System.currentTimeMillis() - lastDetectionTime < 500)) {
+                        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE;
+                        int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE;
+
+                        // Tìm viền bao quanh (Bounding Box)
+                        for (Point p : lastDetectedPoints) {
+                            if (p.x() < minX) minX = p.x();
+                            if (p.y() < minY) minY = p.y();
+                            if (p.x() > maxX) maxX = p.x();
+                            if (p.y() > maxY) maxY = p.y();
+                        }
+
+                        // Căn lề lùi ra ngoài 15px cho đẹp mắt y như khung camera an ninh chuyên nghiệp
+                        minX = Math.max(0, minX - 15);
+                        minY = Math.max(0, minY - 15);
+                        maxX += 15;
+                        maxY += 15;
+
+                        // Vẽ khung chữ nhật
+                        opencv_imgproc.rectangle(displayMat, new Point(minX, minY), new Point(maxX, maxY), new Scalar(0, 255, 0, 0), 4, opencv_imgproc.LINE_AA, 0);
+                    }
+
+                    Frame frameForRecord = matConverter.convert(recordMat);
+                    Frame frameForDisplay = matConverter.convert(displayMat);
 
                     synchronized (recorderLock) {
                         if (isRecording && recorder != null) {
                             try {
-                                long elapsedTimeMs = System.currentTimeMillis() - recordingStartTime;
-                                recorder.setTimestamp(elapsedTimeMs * 1000L);
-                                recorder.record(processedFrame);
+                                if (firstVideoTimestamp < 0) {
+                                    firstVideoTimestamp = grabber.getTimestamp();
+                                    recorder.setTimestamp(0);
+                                } else {
+                                    long currentTs = grabber.getTimestamp();
+                                    if (currentTs > firstVideoTimestamp) {
+                                        recorder.setTimestamp(currentTs - firstVideoTimestamp);
+                                    } else {
+                                        recorder.setTimestamp(recorder.getTimestamp() + 33333);
+                                    }
+                                }
+                                recorder.record(frameForRecord);
                             } catch (Exception e) {
                             }
                         }
@@ -467,7 +534,7 @@ public class GuardCamApp extends Application {
 
                     if (!isUiUpdating && !playbackPane.isVisible()) {
                         isUiUpdating = true;
-                        Image fxImage = fxConverter.convert(processedFrame);
+                        Image fxImage = fxConverter.convert(frameForDisplay);
                         if (fxImage != null) {
                             Platform.runLater(() -> {
                                 cameraView.setImage(fxImage);
@@ -478,18 +545,35 @@ public class GuardCamApp extends Application {
 
                     if (frameCount % 10 == 0 && !isScanning && !playbackPane.isVisible()) {
                         isScanning = true;
-                        Frame frameClone = processedFrame.clone();
+                        Frame frameClone = frameForRecord.clone();
                         aiScannerThread.submit(() -> {
                             try {
                                 BufferedImage bImage = java2dConverter.getBufferedImage(frameClone);
                                 if (bImage != null) {
                                     int cropW = (int) (bImage.getWidth() * 0.5);
                                     int cropH = (int) (bImage.getHeight() * 0.4);
-                                    BufferedImage cloneForAI = bImage.getSubimage((bImage.getWidth() - cropW) / 2, (bImage.getHeight() - cropH) / 2, cropW, cropH);
-                                    String scannedCode = scanBarcode(cloneForAI);
-                                    if (scannedCode != null && scannedCode.length() > 5 && !scannedCode.equals(currentTrackingCode)) {
-                                        java.awt.Toolkit.getDefaultToolkit().beep();
-                                        Platform.runLater(() -> triggerNewOrder(scannedCode));
+                                    int cX = (bImage.getWidth() - cropW) / 2;
+                                    int cY = (bImage.getHeight() - cropH) / 2;
+                                    BufferedImage cloneForAI = bImage.getSubimage(cX, cY, cropW, cropH);
+
+                                    Result result = scanBarcodeResult(cloneForAI);
+                                    if (result != null) {
+                                        String scannedCode = result.getText();
+
+                                        ResultPoint[] rPoints = result.getResultPoints();
+                                        if (rPoints != null && rPoints.length > 0) {
+                                            Point[] mappedPoints = new Point[rPoints.length];
+                                            for (int i = 0; i < rPoints.length; i++) {
+                                                mappedPoints[i] = new Point((int) (rPoints[i].getX() + cX), (int) (rPoints[i].getY() + cY));
+                                            }
+                                            lastDetectedPoints = mappedPoints;
+                                            lastDetectionTime = System.currentTimeMillis();
+                                        }
+
+                                        if (scannedCode != null && scannedCode.length() > 5 && !scannedCode.equals(currentTrackingCode)) {
+                                            playScannerBeep();
+                                            Platform.runLater(() -> triggerNewOrder(scannedCode));
+                                        }
                                     }
                                 }
                             } finally {
@@ -513,9 +597,9 @@ public class GuardCamApp extends Application {
         camThread.start();
     }
 
-    private String scanBarcode(BufferedImage image) {
+    private Result scanBarcodeResult(BufferedImage image) {
         try {
-            return barcodeReader.decodeWithState(new BinaryBitmap(new HybridBinarizer(new BufferedImageLuminanceSource(image)))).getText();
+            return barcodeReader.decodeWithState(new BinaryBitmap(new HybridBinarizer(new BufferedImageLuminanceSource(image))));
         } catch (Exception e) {
             return null;
         } finally {
@@ -534,7 +618,8 @@ public class GuardCamApp extends Application {
         scanIndicator.setTextFill(Color.web("#3b82f6"));
         overlayText.setText("🔴 ĐANG QUAY: " + newCode);
         overlayText.setTextFill(Color.web("#ef4444"));
-        aimBox.setVisible(false);
+
+        aimBox.setVisible(true);
         barcodeInput.clear();
 
         new Thread(() -> {
@@ -545,22 +630,18 @@ public class GuardCamApp extends Application {
                         recorder.stop();
                         recorder.release();
                     }
-                    recordingStartTime = System.currentTimeMillis();
+
+                    firstVideoTimestamp = -1;
+
                     recorder = new FFmpegFrameRecorder(SAVE_DIR + currentTrackingCode + ".mp4", grabber.getImageWidth(), grabber.getImageHeight());
                     recorder.setVideoCodec(org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264);
                     recorder.setFormat("mp4");
-                    recorder.setFrameRate(30); // Ép cứng 30fps
+                    recorder.setFrameRate(30);
 
-                    // --- ĐOẠN CẦN SỬA ĐỂ HẾT XƯỚC ---
-                    recorder.setVideoOption("tune", "zerolatency"); // Quan trọng nhất: Loại bỏ độ trễ nén gây xước
-                    recorder.setVideoOption("x264opts", "keyint=15:min-keyint=15:no-scenecut:bframes=0");
-                    recorder.setVideoOption("preset", "ultrafast"); // Nén cực nhanh để khớp tốc độ camera
-                    recorder.setVideoOption("crf", "20");           // Độ nét cao
-                    recorder.setVideoBitrate(8000000);              // 8Mbps cho 1080p
-                    recorder.setVideoOption("sws_flags", "lanczos+accurate_rnd");
+                    recorder.setVideoOption("preset", "veryfast");
+                    recorder.setVideoOption("crf", "18");
+                    recorder.setVideoBitrate(10000000);
                     recorder.setPixelFormat(org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_YUV420P);
-                    recorder.setVideoOption("color_range", "2");
-                    recorder.setGopSize(15);
                     recorder.start();
                     isRecording = true;
                 } catch (Exception e) {
@@ -639,12 +720,10 @@ public class GuardCamApp extends Application {
                 searchMediaPlayer = new MediaPlayer(media);
                 searchMediaView.setMediaPlayer(searchMediaPlayer);
 
-                // Đồng bộ độ dài thanh kéo khi Video đã sẵn sàng
                 searchMediaPlayer.setOnReady(() -> {
                     timeSlider.setMax(searchMediaPlayer.getTotalDuration().toSeconds());
                 });
 
-                // Cập nhật thanh kéo và Label thời gian khi video đang chạy
                 searchMediaPlayer.currentTimeProperty().addListener((obs, oldTime, newTime) -> {
                     if (!timeSlider.isValueChanging()) {
                         timeSlider.setValue(newTime.toSeconds());
@@ -654,7 +733,6 @@ public class GuardCamApp extends Application {
                     timeLabel.setText(currentStr + " / " + totalStr);
                 });
 
-                // Cập nhật giao diện Nút khi hết video
                 searchMediaPlayer.setOnEndOfMedia(() -> {
                     playPauseBtn.setText("🔄 Phát lại");
                     searchMediaPlayer.pause();
@@ -671,7 +749,6 @@ public class GuardCamApp extends Application {
         }
     }
 
-    // Hàm phụ trợ Format Thời gian thành mm:ss
     private String formatTime(double totalSeconds) {
         if (Double.isNaN(totalSeconds)) return "00:00";
         int minutes = (int) (totalSeconds / 60);
