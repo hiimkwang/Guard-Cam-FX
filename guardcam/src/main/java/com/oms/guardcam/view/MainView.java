@@ -203,34 +203,40 @@ public class MainView {
 
         // --- KHU VỰC PLAYBACK VIEW ---
         playbackPane = new StackPane();
-        playbackPane.setStyle("-fx-background-color: rgba(15, 23, 42, 0.95);");
+        playbackPane.setStyle("-fx-background-color: #0f172a;"); // Đổi nền màu Navy cho chuẩn tone
         playbackPane.setVisible(false);
 
-        BorderPane playerLayout = new BorderPane();
-        playerLayout.setPadding(new Insets(20));
+        // Dùng VBox làm trục chính: Chia 2 tầng rõ rệt (Tầng Video và Tầng Control)
+        VBox playerLayout = new VBox(15);
+        playerLayout.setAlignment(Pos.CENTER);
+        playerLayout.setPadding(new Insets(20, 20, 30, 20));
 
-        // TẠO LỒNG TỶ LỆ VÀNG 16:9 CHO PLAYBACK
+        // ==========================================
+        // TẦNG 1: KHU VỰC VIDEO (Tự động co giãn)
+        // ==========================================
+        StackPane pbVideoArea = new StackPane();
+        VBox.setVgrow(pbVideoArea, Priority.ALWAYS); // Ép chiếm hết toàn bộ không gian trống
+        pbVideoArea.setMinSize(0, 0); // Cho phép thu nhỏ để không bị kẹt
+
+        // Khung lồng 16:9 tự động tính toán dựa trên vùng pbVideoArea
         StackPane pbVideoWrapper = new StackPane();
         pbVideoWrapper.maxWidthProperty().bind(
-                javafx.beans.binding.Bindings.min(playbackPane.widthProperty().subtract(100), playbackPane.heightProperty().subtract(300).multiply(16.0 / 9.0))
+                javafx.beans.binding.Bindings.min(pbVideoArea.widthProperty(), pbVideoArea.heightProperty().multiply(16.0 / 9.0))
         );
         pbVideoWrapper.maxHeightProperty().bind(
-                javafx.beans.binding.Bindings.min(playbackPane.heightProperty().subtract(300), playbackPane.widthProperty().subtract(100).multiply(9.0 / 16.0))
+                javafx.beans.binding.Bindings.min(pbVideoArea.heightProperty(), pbVideoArea.widthProperty().multiply(9.0 / 16.0))
         );
 
-        // MediaView cho Toàn cảnh
         searchMediaViewPano = new MediaView();
         searchMediaViewPano.setPreserveRatio(true);
         searchMediaViewPano.fitWidthProperty().bind(pbVideoWrapper.maxWidthProperty());
         searchMediaViewPano.fitHeightProperty().bind(pbVideoWrapper.maxHeightProperty());
 
-        // MediaView cho QR (Chuẩn dọc 9:16)
         searchMediaViewQr = new MediaView();
         searchMediaViewQr.setPreserveRatio(true);
         searchMediaViewQr.fitHeightProperty().bind(pbVideoWrapper.maxHeightProperty().multiply(0.35));
         searchMediaViewQr.fitWidthProperty().bind(searchMediaViewQr.fitHeightProperty().multiply(9.0 / 16.0));
 
-        // Khung viền cho QR
         StackPane pbQrContainer = new StackPane(searchMediaViewQr);
         pbQrContainer.setMaxSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
         pbQrContainer.setStyle("-fx-border-color: rgba(255,255,255,0.6); -fx-border-width: 1.5; -fx-background-color: #000000; -fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.8), 15, 0, 0, 5); -fx-border-radius: 6; -fx-background-radius: 6;");
@@ -238,9 +244,24 @@ public class MainView {
         StackPane.setMargin(pbQrContainer, new Insets(0, 20, 20, 0));
 
         pbVideoWrapper.getChildren().addAll(searchMediaViewPano, pbQrContainer);
-        playerLayout.setCenter(pbVideoWrapper);
+        pbVideoArea.getChildren().add(pbVideoWrapper);
 
-        // --- THANH ĐIỀU KHIỂN (Controls) ---
+        // Nút Đóng Video: Gắn thẳng vào Tầng Video thay vì ngoài cùng để tránh đè viền Windows
+        closePlaybackBtn = new Button("❌ Đóng Video");
+        closePlaybackBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8 16; -fx-background-radius: 6px; -fx-cursor: hand;");
+        StackPane.setAlignment(closePlaybackBtn, Pos.TOP_RIGHT);
+        StackPane.setMargin(closePlaybackBtn, new Insets(0));
+        pbVideoArea.getChildren().add(closePlaybackBtn);
+
+        // ==========================================
+        // TẦNG 2: KHU VỰC THÔNG TIN (Khóa cố định)
+        // ==========================================
+        VBox bottomControls = new VBox(15);
+        bottomControls.setAlignment(Pos.CENTER);
+
+        // CHỐNG MẤT DATA: Lệnh này cấm JavaFX thu nhỏ khu vực này khi Resize
+        bottomControls.setMinSize(Region.USE_PREF_SIZE, Region.USE_PREF_SIZE);
+
         HBox controlBar = new HBox(15);
         controlBar.setAlignment(Pos.CENTER);
         controlBar.setPadding(new Insets(10, 20, 10, 20));
@@ -256,13 +277,11 @@ public class MainView {
         timeLabel = new Label("00:00 / 00:00");
         timeLabel.setTextFill(Color.WHITE);
 
-        // NÚT GHÉP VIDEO
         mergeVideoBtn = new Button("✂️ Ghép thành 1 File");
         mergeVideoBtn.setStyle("-fx-background-color: #f59e0b; -fx-text-fill: white; -fx-font-weight: bold; -fx-cursor: hand;");
 
         controlBar.getChildren().addAll(playPauseBtn, timeSlider, timeLabel, mergeVideoBtn);
 
-        // --- THÔNG TIN ĐƠN HÀNG ---
         VBox pbMetaBox = new VBox(8);
         pbMetaBox.setMaxWidth(1000);
         pbMetaBox.setStyle("-fx-background-color: #1e293b; -fx-padding: 20px; -fx-border-radius: 12px; -fx-border-color: #475569;");
@@ -272,29 +291,17 @@ public class MainView {
         pbShipper = new Label("👤 Nhân viên: Admin"); pbShipper.setTextFill(Color.web("#89b4fa"));
         pbSize = new Label("💾 Dung lượng: ---"); pbSize.setTextFill(Color.web("#f38ba8"));
 
-        // Tạo VBox chứa các đường dẫn file (Click vào là mở)
-        Label pbl = new Label("📂 Danh sách File (Click để mở):");
-        pbl.setTextFill(Color.web("#cbd5e1"));
+        Label pbl = new Label("📂 Danh sách File (Click để mở):"); pbl.setTextFill(Color.web("#cbd5e1"));
         pathBoxContainer = new VBox(5);
         pathBoxContainer.setPadding(new Insets(5, 0, 0, 10));
 
         pbMetaBox.getChildren().addAll(pbTitle, pbTime, pbShipper, pbSize, pbl, pathBoxContainer);
 
-        // ... (Phần VBox bottomControls giữ nguyên) ...
-
-        VBox bottomControls = new VBox(15);
-        bottomControls.setAlignment(Pos.CENTER);
         bottomControls.getChildren().addAll(controlBar, pbMetaBox);
-        playerLayout.setBottom(bottomControls);
-        BorderPane.setMargin(bottomControls, new Insets(15, 0, 0, 0));
 
-        // NÚT ĐÓNG VIDEO
-        closePlaybackBtn = new Button("❌ Đóng Video (Quay lại Live)");
-        closePlaybackBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10 20; -fx-background-radius: 6px; -fx-cursor: hand;");
-        StackPane.setAlignment(closePlaybackBtn, Pos.TOP_RIGHT);
-        StackPane.setMargin(closePlaybackBtn, new Insets(20));
-
-        playbackPane.getChildren().addAll(playerLayout, closePlaybackBtn);
+        // Lắp 2 tầng vào VBox chính
+        playerLayout.getChildren().addAll(pbVideoArea, bottomControls);
+        playbackPane.getChildren().add(playerLayout);
 
         centerPane.getChildren().addAll(liveViewPane, playbackPane);
         root.setCenter(centerPane);

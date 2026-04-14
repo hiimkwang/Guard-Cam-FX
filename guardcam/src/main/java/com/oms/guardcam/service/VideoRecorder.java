@@ -108,59 +108,63 @@ public class VideoRecorder {
         order.setMergedVideoPath(SAVE_DIR + order.getTrackingCode() + "_merged.mp4");
 
         new Thread(() -> {
-            try (FFmpegFrameGrabber gPano = new FFmpegFrameGrabber(order.getPanoVideoPath());
-                 FFmpegFrameGrabber gQr = new FFmpegFrameGrabber(order.getQrVideoPath())) {
+            try (org.bytedeco.javacv.FFmpegFrameGrabber gPano = new org.bytedeco.javacv.FFmpegFrameGrabber(order.getPanoVideoPath());
+                 org.bytedeco.javacv.FFmpegFrameGrabber gQr = new org.bytedeco.javacv.FFmpegFrameGrabber(order.getQrVideoPath())) {
 
-                // 1. FIX LỖI MẤT HÌNH: Ép cả 2 video phải dùng chung hệ màu BGR24
-                // Đảm bảo OpenCV 100% cho phép vẽ đè ảnh này lên ảnh kia
+                // 1. Ép chung hệ màu BGR24 để OpenCV chắc chắn cho phép vẽ đè
                 gPano.setPixelFormat(org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR24);
                 gQr.setPixelFormat(org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR24);
 
                 gPano.start();
                 gQr.start();
 
-                FFmpegFrameRecorder r = new FFmpegFrameRecorder(order.getMergedVideoPath(), gPano.getImageWidth(), gPano.getImageHeight());
+                org.bytedeco.javacv.FFmpegFrameRecorder r = new org.bytedeco.javacv.FFmpegFrameRecorder(order.getMergedVideoPath(), gPano.getImageWidth(), gPano.getImageHeight());
                 setupRecorder(r);
                 r.start();
 
-                Frame fPano;
-                // Dùng grabImage() để bỏ qua luồng âm thanh, chống lỗi Null Pointer
+                // =========================================================
+                // FIX LỖI TÀNG HÌNH: TẠO 2 BỘ CONVERTER ĐỘC LẬP
+                // Không dùng ImageUtils ở đây để tránh bị ghi đè bộ nhớ đệm
+                // =========================================================
+                org.bytedeco.javacv.OpenCVFrameConverter.ToMat convPano = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
+                org.bytedeco.javacv.OpenCVFrameConverter.ToMat convQr = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
+
+                org.bytedeco.javacv.Frame fPano;
+                // Chỉ lấy hình ảnh (grabImage) để chống lỗi NullPointerException của âm thanh
                 while ((fPano = gPano.grabImage()) != null) {
-                    Frame fQr = gQr.grabImage();
+                    org.bytedeco.javacv.Frame fQr = gQr.grabImage();
 
                     if (fQr == null) {
                         r.record(fPano);
                         continue;
                     }
 
-                    Mat matPano = ImageUtils.frameToMat(fPano);
-                    Mat matQr = ImageUtils.frameToMat(fQr);
+                    // Ép sang Mat qua 2 "ống" độc lập, không xâm phạm nhau
+                    org.bytedeco.opencv.opencv_core.Mat matPano = convPano.convert(fPano);
+                    org.bytedeco.opencv.opencv_core.Mat matQr = convQr.convert(fQr);
 
                     if (matPano == null || matQr == null || matPano.isNull() || matQr.isNull()) {
                         r.record(fPano);
                         continue;
                     }
 
-                    // Tính toán kích thước cam nhỏ (Bằng 1/4 bề ngang cam lớn)
-                    int smallW = matPano.cols() / 4;
+                    // Thu nhỏ QR bằng 1/6 chiều rộng Pano
+                    int smallW = matPano.cols() / 6;
                     int smallH = (matQr.rows() * smallW) / matQr.cols();
 
-                    // Thu nhỏ cam QR
-                    Mat smallResized = new Mat();
-                    opencv_imgproc.resize(matQr, smallResized, new Size(smallW, smallH));
+                    org.bytedeco.opencv.opencv_core.Mat smallResized = new org.bytedeco.opencv.opencv_core.Mat();
+                    org.bytedeco.opencv.global.opencv_imgproc.resize(matQr, smallResized, new org.bytedeco.opencv.opencv_core.Size(smallW, smallH));
 
-                    // Xác định tọa độ góc dưới bên phải (cách lề 20px)
+                    // Tọa độ góc phải dưới (cách lề 20px)
                     int posX = matPano.cols() - smallW - 20;
                     int posY = matPano.rows() - smallH - 20;
 
-                    // 2. FIX LỖI MẤT HÌNH: Dùng .apply() để trỏ đúng vào vùng nhớ của ảnh Pano
-                    Mat roi = matPano.apply(new Rect(posX, posY, smallW, smallH));
-
-                    // Vẽ đè ảnh QR lên vùng nhớ đó
+                    // Vẽ đè ảnh QR lên vùng (ROI) của ảnh Pano
+                    org.bytedeco.opencv.opencv_core.Mat roi = matPano.apply(new org.bytedeco.opencv.opencv_core.Rect(posX, posY, smallW, smallH));
                     smallResized.copyTo(roi);
 
-                    // Lưu frame đã được vẽ đè vào video mới
-                    r.record(ImageUtils.matToFrame(matPano));
+                    // Đóng gói lại bằng ống của Pano và lưu
+                    r.record(convPano.convert(matPano));
                 }
                 r.stop();
                 if (onComplete != null) onComplete.run();
@@ -170,6 +174,5 @@ public class VideoRecorder {
             }
         }).start();
     }
-
     public boolean isRecording() { return isRecording; }
 }
