@@ -7,14 +7,16 @@ public class CameraManager {
     private FFmpegFrameGrabber grabber;
     private volatile boolean isRunning = false;
 
-    // Callback interface
     public interface FrameListener {
         void onFrameCaptured(Frame frame, long timestamp);
+
         void onError(Exception e);
     }
 
     public void startCamera(String camName, int width, int height, FrameListener listener) {
         isRunning = true;
+
+        // Luồng background chịu trách nhiệm toàn bộ vòng đời của Camera
         Thread camThread = new Thread(() -> {
             try {
                 if (camName.equals("0")) {
@@ -27,9 +29,10 @@ public class CameraManager {
                 grabber.setImageWidth(width);
                 grabber.setImageHeight(height);
                 grabber.setFrameRate(30);
-                grabber.setOption("rtbufsize", "1024M"); // Chống tràn buffer cho logitech c920
+                grabber.setOption("rtbufsize", "1024M");
                 grabber.setVideoOption("input_format", "mjpeg");
                 grabber.setVideoOption("vcodec", "mjpeg");
+
                 grabber.start();
 
                 while (isRunning) {
@@ -41,7 +44,18 @@ public class CameraManager {
             } catch (Exception e) {
                 if (listener != null) listener.onError(e);
             } finally {
-                stopCamera();
+                // TỰ ĐỘNG DỌN DẸP AN TOÀN TRONG LUỒNG RIÊNG
+                // Xóa bỏ xung đột với UI Thread
+                try {
+                    if (grabber != null) {
+                        grabber.stop();
+                        grabber.release();
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                grabber = null;
+                isRunning = false;
             }
         });
         camThread.setDaemon(true);
@@ -50,14 +64,5 @@ public class CameraManager {
 
     public void stopCamera() {
         isRunning = false;
-        try {
-            if (grabber != null) {
-                grabber.stop();
-                grabber.release();
-                grabber = null;
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
     }
 }

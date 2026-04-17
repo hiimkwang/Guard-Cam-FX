@@ -21,23 +21,22 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-
+import java.util.prefs.Preferences;
 
 public class MainController {
     private MainView view;
 
-    // Các Service Core
     private CameraManager panoCamManager;
     private CameraManager qrCamManager;
     private VideoRecorder videoRecorder;
     private BarcodeScanner barcodeScanner;
     private ApiSyncService apiSyncService;
 
-    // Trạng thái hệ thống
     private boolean isSystemRunning = false;
+    private volatile boolean isPanoWorking = false;
+    private volatile boolean isQrWorking = false;
     private OrderRecord currentOrder = null;
 
-    // Xử lý đa luồng cho AI Quét mã và Hẹn giờ tắt
     private ExecutorService scannerThreadPool = Executors.newSingleThreadExecutor();
     private ScheduledExecutorService timerThreadPool = Executors.newScheduledThreadPool(1);
     private int scanFrameCounter = 0;
@@ -47,51 +46,67 @@ public class MainController {
     private volatile boolean isFlushingVideo = false;
     private volatile com.google.zxing.ResultPoint[] lastDetectedPoints = null;
     private volatile long lastDetectionTime = 0;
-    // Trình phát video khi xem lại
+
     private javafx.scene.media.MediaPlayer playerPano;
     private javafx.scene.media.MediaPlayer playerQr;
+
     public MainController(MainView view) {
         this.view = view;
 
-        // Khởi tạo các Service
         this.panoCamManager = new CameraManager();
         this.qrCamManager = new CameraManager();
         this.videoRecorder = new VideoRecorder();
         this.barcodeScanner = new BarcodeScanner();
         this.apiSyncService = new ApiSyncService();
 
-        initEventHandlers();
         loadDeviceList();
+        initEventHandlers();
     }
 
     private void loadDeviceList() {
         try {
             String[] devices = org.bytedeco.javacv.VideoInputFrameGrabber.getDeviceDescriptions();
             if (devices != null && devices.length > 0) {
-                // MainView cần có 2 ComboBox cho 2 cam
                 view.cameraPanoSelect.getItems().addAll(devices);
                 view.cameraQrSelect.getItems().addAll(devices);
             }
-        } catch (Exception e) {}
-
-        if (!view.cameraPanoSelect.getItems().isEmpty()) {
-            view.cameraPanoSelect.getSelectionModel().selectFirst();
-            view.cameraQrSelect.getSelectionModel().selectLast(); // Tạm chọn cam cuối cho QR
+        } catch (Exception e) {
         }
     }
 
-    private void initEventHandlers() {
-        view.startCamBtn.setOnAction(e -> toggleSystem());
-        view.barcodeInput.setOnAction(e -> processNewOrder(view.barcodeInput.getText().trim()));
-        view.stopManualBtn.setOnAction(e -> stopCurrentRecording());
+    private void loadSettings() {
+        Preferences prefs = Preferences.userNodeForPackage(MainController.class);
+        if (!view.cameraPanoSelect.getItems().isEmpty()) {
+            view.cameraPanoSelect.getSelectionModel().select(prefs.get("camPano", view.cameraPanoSelect.getItems().get(0)));
+        }
+        if (!view.cameraQrSelect.getItems().isEmpty()) {
+            view.cameraQrSelect.getSelectionModel().select(prefs.get("camQr", view.cameraQrSelect.getItems().get(view.cameraQrSelect.getItems().size() - 1)));
+        }
+        view.autoStopSelect.getSelectionModel().select(prefs.getInt("autoStop", 1));
+    }
 
-        // Bắt sự kiện ấn nút ghép Video lúc xem lại
+    private void saveSettings() {
+        Preferences prefs = Preferences.userNodeForPackage(MainController.class);
+        prefs.put("camPano", view.cameraPanoSelect.getValue() != null ? view.cameraPanoSelect.getValue() : "0");
+        prefs.put("camQr", view.cameraQrSelect.getValue() != null ? view.cameraQrSelect.getValue() : "0");
+        prefs.putInt("autoStop", view.autoStopSelect.getSelectionModel().getSelectedIndex());
+
+        Alert a = new Alert(Alert.AlertType.INFORMATION, "Đã lưu cấu hình Camera thành công!");
+        a.show();
+    }
+
+    private void initEventHandlers() {
+        loadSettings();
+
+        view.saveSettingsBtn.setOnAction(e -> saveSettings());
+        view.startCamBtn.setOnAction(e -> toggleSystem());
+        view.stopManualBtn.setOnAction(e -> stopCurrentRecording());
+        view.barcodeInput.setOnAction(e -> processNewOrder(view.barcodeInput.getText().trim()));
         view.searchBtn.setOnAction(e -> handleSearchVideo());
         view.closePlaybackBtn.setOnAction(e -> closePlaybackMode());
         view.playPauseBtn.setOnAction(e -> togglePlayback());
         view.mergeVideoBtn.setOnAction(e -> handleMergeAction());
 
-        // Lắng nghe thao tác kéo thanh thời gian
         view.timeSlider.valueChangingProperty().addListener((obs, wasChanging, isChanging) -> {
             if (!isChanging) seekVideo(view.timeSlider.getValue());
         });
@@ -104,7 +119,7 @@ public class MainController {
 
     private void toggleSystem() {
         if (isSystemRunning) {
-            shutdownSystem();
+            stopCameraSystem();
         } else {
             startSystem();
         }
@@ -112,10 +127,17 @@ public class MainController {
 
     private void startSystem() {
         isSystemRunning = true;
-        view.startCamBtn.setText("⏹ TẮT HỆ THỐNG");
-        view.startCamBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 12px; -fx-background-radius: 6px;");
+
+        view.qrContainer.setVisible(true);
+        view.overlayText.setVisible(true);
+
+        view.startCamBtn.setText("⏹ DỪNG GHI HÌNH");
+        view.startCamBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10px; -fx-background-radius: 6px;");
         updateUiStatus("SẴN SÀNG QUÉT MÃ", "#10b981");
-        //view.aimBox.setVisible(true);
+
+        view.scanIndicator.setText("Mắt AI: Đang dò mã...");
+        view.scanIndicator.setTextFill(Color.web("#3b82f6"));
+
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat toMatConverter = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat toFrameConverter = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.JavaFXFrameConverter fxConverter = new org.bytedeco.javacv.JavaFXFrameConverter();
@@ -123,97 +145,107 @@ public class MainController {
         String panoCamName = view.cameraPanoSelect.getValue();
         String qrCamName = view.cameraQrSelect.getValue();
 
-        // 1. Khởi động Camera Toàn cảnh (Pano)
-        // Khởi tạo Converter dùng riêng cho Cam Toàn Cảnh
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat panoToMat = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat panoToFrame = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.JavaFXFrameConverter panoFx = new org.bytedeco.javacv.JavaFXFrameConverter();
 
-        // 1. Khởi động Camera Toàn cảnh (Pano)
+        isPanoWorking = true;
         panoCamManager.startCamera(panoCamName, 1920, 1080, new CameraManager.FrameListener() {
             @Override
             public void onFrameCaptured(org.bytedeco.javacv.Frame frame, long timestamp) {
-                // Chuyển sang Mat để vẽ chữ
-                org.bytedeco.opencv.opencv_core.Mat panoMat = panoToMat.convert(frame).clone();
+                org.bytedeco.opencv.opencv_core.Mat panoMat = null;
+                try {
+                    // clone() cấp phát bộ nhớ mới C++ -> BẮT BUỘC PHẢI CLOSE
+                    panoMat = panoToMat.convert(frame).clone();
 
-                // 1. VẼ THỜI GIAN THỰC (Góc trái trên)
-                String timeText = videoTimeFormat.format(new java.util.Date());
-                org.bytedeco.opencv.global.opencv_imgproc.putText(panoMat, timeText,
-                        new org.bytedeco.opencv.opencv_core.Point(20, 50),
-                        org.bytedeco.opencv.global.opencv_imgproc.FONT_HERSHEY_SIMPLEX,
-                        1.2, new org.bytedeco.opencv.opencv_core.Scalar(0, 255, 255, 0), 2, org.bytedeco.opencv.global.opencv_imgproc.LINE_AA, false);
-
-                // 2. VẼ MÃ ĐƠN HÀNG (Nếu đang trong trạng thái quay)
-                if (videoRecorder.isRecording() && currentOrder != null) {
-                    org.bytedeco.opencv.global.opencv_imgproc.putText(panoMat, "ORDER: " + currentOrder.getTrackingCode(),
-                            new org.bytedeco.opencv.opencv_core.Point(20, 100),
+                    String timeText = videoTimeFormat.format(new java.util.Date());
+                    org.bytedeco.opencv.global.opencv_imgproc.putText(panoMat, timeText,
+                            new org.bytedeco.opencv.opencv_core.Point(20, 50),
                             org.bytedeco.opencv.global.opencv_imgproc.FONT_HERSHEY_SIMPLEX,
-                            1.0, new org.bytedeco.opencv.opencv_core.Scalar(0, 0, 255, 0), 2, org.bytedeco.opencv.global.opencv_imgproc.LINE_AA, false);
+                            1.2, new org.bytedeco.opencv.opencv_core.Scalar(0, 255, 255, 0), 2, org.bytedeco.opencv.global.opencv_imgproc.LINE_AA, false);
+
+                    if (videoRecorder.isRecording() && currentOrder != null) {
+                        org.bytedeco.opencv.global.opencv_imgproc.putText(panoMat, "ORDER: " + currentOrder.getTrackingCode(),
+                                new org.bytedeco.opencv.opencv_core.Point(20, 100),
+                                org.bytedeco.opencv.global.opencv_imgproc.FONT_HERSHEY_SIMPLEX,
+                                1.0, new org.bytedeco.opencv.opencv_core.Scalar(0, 0, 255, 0), 2, org.bytedeco.opencv.global.opencv_imgproc.LINE_AA, false);
+                    }
+
+                    org.bytedeco.javacv.Frame drawnFrame = panoToFrame.convert(panoMat);
+                    javafx.scene.image.Image panoImg = panoFx.convert(drawnFrame);
+
+                    Platform.runLater(() -> view.cameraView.setImage(panoImg));
+
+                    if (videoRecorder.isRecording() && isPanoWorking) {
+                        videoRecorder.recordPanoFrame(drawnFrame);
+                    }
+                } finally {
+                    // DỌN RÁC NGAY LẬP TỨC: NGĂN CHẶN TRÀN 6GB RAM
+                    if (panoMat != null) panoMat.close();
+                    if (frame != null) frame.close();
                 }
-
-                // Đóng gói lại thành Frame sau khi đã vẽ xong
-                org.bytedeco.javacv.Frame drawnFrame = panoToFrame.convert(panoMat);
-
-                // FIX CRASH: Phải convert sang ảnh JavaFX ngay tại luồng này (Đồng bộ)
-                // Tuyệt đối không ném Frame C++ thẳng vào runLater nữa
-                javafx.scene.image.Image panoImg = panoFx.convert(drawnFrame);
-
-                // Đưa ảnh đã an toàn lên UI
-                Platform.runLater(() -> view.cameraView.setImage(panoImg));
-
-                // Ghi hình an toàn
-                if (videoRecorder.isRecording()) videoRecorder.recordPanoFrame(drawnFrame);
             }
+
             @Override
-            public void onError(Exception e) { handleCameraError("Cam Toàn Cảnh", e); }
+            public void onError(Exception e) {
+                isPanoWorking = false;
+                Platform.runLater(() -> System.out.println("Cảnh báo: Cam Toàn Cảnh mất kết nối."));
+            }
         });
 
-        // 2. Khởi động Camera Quét Mã (QR)
+        isQrWorking = true;
         qrCamManager.startCamera(qrCamName, 1280, 720, new CameraManager.FrameListener() {
             @Override
             public void onFrameCaptured(org.bytedeco.javacv.Frame frame, long timestamp) {
-                // 1. Lấy khung ngang gốc
-                org.bytedeco.opencv.opencv_core.Mat originalMat = toMatConverter.convert(frame);
+                org.bytedeco.opencv.opencv_core.Mat cleanMat = null;
+                org.bytedeco.opencv.opencv_core.Mat uiMat = null;
+                try {
+                    org.bytedeco.opencv.opencv_core.Mat originalMat = toMatConverter.convert(frame);
 
-                // 2. Xoay dọc 90 độ -> TẠO BẢN "SẠCH" (Dùng để ghi video và quét AI)
-                org.bytedeco.opencv.opencv_core.Mat cleanMat = new org.bytedeco.opencv.opencv_core.Mat();
-                org.bytedeco.opencv.global.opencv_core.rotate(originalMat, cleanMat, org.bytedeco.opencv.global.opencv_core.ROTATE_90_COUNTERCLOCKWISE);
+                    // Cấp phát bộ nhớ -> BẮT BUỘC PHẢI CLOSE
+                    cleanMat = new org.bytedeco.opencv.opencv_core.Mat();
+                    org.bytedeco.opencv.global.opencv_core.rotate(originalMat, cleanMat, org.bytedeco.opencv.global.opencv_core.ROTATE_90_COUNTERCLOCKWISE);
 
-                // Đóng gói bản sạch thành Frame dọc (720x1280)
-                org.bytedeco.javacv.Frame cleanFrame = toFrameConverter.convert(cleanMat);
+                    org.bytedeco.javacv.Frame cleanFrame = toFrameConverter.convert(cleanMat);
 
-                // 3. Ghi hình bản Sạch (Không có khung xanh)
-                if (videoRecorder.isRecording()) {
-                    videoRecorder.recordQrFrame(cleanFrame);
-                }
-
-                // 4. TẠO BẢN "NHÁP" (Clone) ĐỂ HIỂN THỊ UI & VẼ KHUNG
-                org.bytedeco.opencv.opencv_core.Mat uiMat = cleanMat.clone();
-                if (lastDetectedPoints != null && (System.currentTimeMillis() - lastDetectionTime < 500)) {
-                    drawBoundingBox(uiMat, lastDetectedPoints); // Chỉ vẽ lên bản nháp
-                }
-
-                // Đẩy bản nháp (có khung xanh) lên màn hình JavaFX
-                javafx.scene.image.Image uiImg = fxConverter.convert(toFrameConverter.convert(uiMat));
-                Platform.runLater(() -> view.cameraQrView.setImage(uiImg));
-
-                // 5. Quét AI (Dùng bản sạch để AI đọc nhanh hơn, không bị khung che)
-                if (!isScanning) {
-                    scanFrameCounter++;
-                    if (scanFrameCounter % 8 == 0) {
-                        scanBarcodeAsync(cleanFrame.clone());
+                    if (videoRecorder.isRecording() && isQrWorking) {
+                        videoRecorder.recordQrFrame(cleanFrame);
                     }
+
+                    // Cấp phát bộ nhớ -> BẮT BUỘC PHẢI CLOSE
+                    uiMat = cleanMat.clone();
+                    if (lastDetectedPoints != null && (System.currentTimeMillis() - lastDetectionTime < 500)) {
+                        drawBoundingBox(uiMat, lastDetectedPoints);
+                    }
+
+                    javafx.scene.image.Image uiImg = fxConverter.convert(toFrameConverter.convert(uiMat));
+                    Platform.runLater(() -> view.cameraQrView.setImage(uiImg));
+
+                    if (!isScanning) {
+                        scanFrameCounter++;
+                        if (scanFrameCounter % 8 == 0) {
+                            scanBarcodeAsync(cleanFrame.clone());
+                        }
+                    }
+                } finally {
+                    // DỌN RÁC TRÁNH CRASH ỨNG DỤNG
+                    if (cleanMat != null) cleanMat.close();
+                    if (uiMat != null) uiMat.close();
+                    if (frame != null) frame.close();
                 }
             }
+
             @Override
-            public void onError(Exception e) { handleCameraError("Cam Quét Mã", e); }
+            public void onError(Exception e) {
+                isQrWorking = false;
+                Platform.runLater(() -> System.out.println("Cảnh báo: Cam Quét Mã mất kết nối."));
+            }
         });
     }
 
     private void drawBoundingBox(org.bytedeco.opencv.opencv_core.Mat mat, com.google.zxing.ResultPoint[] points) {
         if (points == null || points.length < 2) return;
 
-        // Tính toán tọa độ Min/Max từ các điểm ZXing trả về
         float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
         float maxX = 0, maxY = 0;
 
@@ -224,17 +256,17 @@ public class MainController {
             if (p.getY() > maxY) maxY = p.getY();
         }
 
-        // Vẽ hình chữ nhật xanh neon bao quanh mã QR
         org.bytedeco.opencv.global.opencv_imgproc.rectangle(
                 mat,
-                new org.bytedeco.opencv.opencv_core.Point((int)minX - 10, (int)minY - 10),
-                new org.bytedeco.opencv.opencv_core.Point((int)maxX + 10, (int)maxY + 10),
-                new org.bytedeco.opencv.opencv_core.Scalar(0, 255, 0, 0), // Màu xanh lá
+                new org.bytedeco.opencv.opencv_core.Point((int) minX - 10, (int) minY - 10),
+                new org.bytedeco.opencv.opencv_core.Point((int) maxX + 10, (int) maxY + 10),
+                new org.bytedeco.opencv.opencv_core.Scalar(0, 255, 0, 0),
                 3,
                 org.bytedeco.opencv.global.opencv_imgproc.LINE_AA,
                 0
         );
     }
+
     private void scanBarcodeAsync(org.bytedeco.javacv.Frame frameToScan) {
         isScanning = true;
         scannerThreadPool.submit(() -> {
@@ -243,14 +275,11 @@ public class MainController {
                 Result result = barcodeScanner.scan(bImage);
 
                 if (result != null) {
-                    // Cập nhật tọa độ điểm và thời gian để luồng UI vẽ khung định vị
                     lastDetectedPoints = result.getResultPoints();
                     lastDetectionTime = System.currentTimeMillis();
 
-                    // Kiểm tra độ dài mã hợp lệ để tạo đơn
                     if (result.getText().length() > 5) {
                         String scannedCode = result.getText();
-                        // CHẶN NGAY NẾU MÃ VỪA QUÉT GIỐNG HỆT MÃ VỪA CẮT
                         if (scannedCode.equals(lastFinishedCode)) {
                             return;
                         }
@@ -261,43 +290,49 @@ public class MainController {
                     }
                 }
             } finally {
-                frameToScan.close();
+                frameToScan.close(); // Giải phóng rác
                 isScanning = false;
             }
         });
     }
+
     private void processNewOrder(String trackingCode) {
         if (trackingCode.isEmpty()) return;
 
-        // Nếu đang quay dở đơn cũ, ngắt ngay lập tức
-        if (videoRecorder.isRecording()) {
-            stopCurrentRecording();
+        if (videoRecorder.isRecording() || isFlushingVideo) {
+            stopCurrentRecording(() -> startNewRecordingLogic(trackingCode));
+        } else {
+            startNewRecordingLogic(trackingCode);
         }
+    }
 
+    private void startNewRecordingLogic(String trackingCode) {
         currentOrder = new OrderRecord(trackingCode);
 
-        // Cập nhật giao diện
-        view.currentCodeDisplay.setText(trackingCode);
-        updateUiStatus("ĐANG GHI HÌNH: " + trackingCode, "#ef4444");
-        view.barcodeInput.clear();
+        Platform.runLater(() -> {
+            view.currentCodeDisplay.setText(trackingCode);
+            updateUiStatus("ĐANG GHI HÌNH: " + trackingCode, "#ef4444");
+            view.scanIndicator.setText("Mắt AI: Đang dò liên tục...");
+            view.scanIndicator.setTextFill(Color.web("#3b82f6"));
+            view.barcodeInput.clear();
+        });
 
-        // Kích hoạt ghi hình 2 luồng
-        videoRecorder.startDualRecording(currentOrder, 1920, 1080, 720, 1280);
-        // Xử lý tự động ngắt
+        videoRecorder.startDualRecording(currentOrder, 1920, 1080, 720, 1280, isPanoWorking, isQrWorking);
+
         int stopIndex = view.autoStopSelect.getSelectionModel().getSelectedIndex();
-        if (stopIndex != 3) { // Khác "Tắt (Thủ công)"
+        if (stopIndex != 3) {
             int delayMs = stopIndex == 0 ? 60000 : (stopIndex == 1 ? 90000 : 120000);
             String codeAtStart = trackingCode;
 
             timerThreadPool.schedule(() -> {
                 if (videoRecorder.isRecording() && currentOrder != null && currentOrder.getTrackingCode().equals(codeAtStart)) {
-                    Platform.runLater(this::stopCurrentRecording);
+                    stopCurrentRecording();
                 }
             }, delayMs, TimeUnit.MILLISECONDS);
         }
     }
 
-    private void stopCurrentRecording() {
+    private void stopCurrentRecording(Runnable onComplete) {
         if (videoRecorder.isRecording()) {
             final OrderRecord finishedOrder = currentOrder;
             if (finishedOrder != null) {
@@ -305,10 +340,13 @@ public class MainController {
             }
 
             currentOrder = null;
-            updateUiStatus("SẴN SÀNG QUÉT MÃ", "#10b981");
-            view.currentCodeDisplay.setText("---");
+            Platform.runLater(() -> {
+                updateUiStatus("SẴN SÀNG QUÉT MÃ", "#10b981");
+                view.currentCodeDisplay.setText("---");
+                view.scanIndicator.setText("Mắt AI: Đang dò mã...");
+                view.scanIndicator.setTextFill(Color.web("#3b82f6"));
+            });
 
-            // BẬT CỜ: Báo hiệu hệ thống đang bận đóng gói file video
             isFlushingVideo = true;
 
             new Thread(() -> {
@@ -316,20 +354,24 @@ public class MainController {
 
                 if (finishedOrder != null) {
                     apiSyncService.syncOrderData(finishedOrder).thenAccept(success -> {
-                        if(success) System.out.println("Đã đồng bộ đơn: " + finishedOrder.getTrackingCode());
+                        if (success) System.out.println("Đã đồng bộ đơn: " + finishedOrder.getTrackingCode());
                     });
                 }
 
-                // TẮT CỜ: Đã lưu xong, cho phép tìm kiếm
                 isFlushingVideo = false;
+                if (onComplete != null) {
+                    onComplete.run();
+                }
             }).start();
+        } else {
+            if (onComplete != null) onComplete.run();
         }
     }
 
-    // Ghép video khi tìm kiếm đơn hàng
-    // ===============================================
-    // KHU VỰC LOGIC XEM LẠI & GHÉP VIDEO (PLAYBACK)
-    // ===============================================
+    private void stopCurrentRecording() {
+        stopCurrentRecording(null);
+    }
+
     private void handleSearchVideo() {
         String code = view.searchTrackingCode.getText().trim();
         if (code.isEmpty()) return;
@@ -342,18 +384,23 @@ public class MainController {
             return;
         }
 
-        String dir = "D:\\Quang-Wordspace\\Guard-Cam-FX\\videos\\";
+        String dir = System.getProperty("user.dir") + java.io.File.separator + "videos" + java.io.File.separator;
         java.io.File filePano = new java.io.File(dir + code + "_pano.mp4");
         java.io.File fileQr = new java.io.File(dir + code + "_qr.mp4");
 
-        if (filePano.exists()) {
-            // Cập nhật thông tin UI
+        if (filePano.exists() || fileQr.exists()) {
             view.pbTitle.setText("MÃ ĐƠN: " + code);
-            view.pbTime.setText("🕒 Đóng gói: " + videoTimeFormat.format(filePano.lastModified()));
-            long sizeMB = (filePano.length() + (fileQr.exists() ? fileQr.length() : 0)) / (1024 * 1024);
+
+            long lastModified = filePano.exists() ? filePano.lastModified() : fileQr.lastModified();
+            view.pbTime.setText("🕒 Đóng gói: " + videoTimeFormat.format(lastModified));
+
+            long sizeMB = ((filePano.exists() ? filePano.length() : 0) + (fileQr.exists() ? fileQr.length() : 0)) / (1024 * 1024);
             view.pbSize.setText("💾 Tổng dung lượng: " + sizeMB + " MB");
             view.pathBoxContainer.getChildren().clear();
-            view.pathBoxContainer.getChildren().add(createFileLink("📹 Cam Toàn Cảnh", filePano));
+
+            if (filePano.exists()) {
+                view.pathBoxContainer.getChildren().add(createFileLink("📹 Cam Toàn Cảnh", filePano));
+            }
             if (fileQr.exists()) {
                 view.pathBoxContainer.getChildren().add(createFileLink("📱 Cam Quét Mã", fileQr));
             }
@@ -362,18 +409,19 @@ public class MainController {
                 view.pathBoxContainer.getChildren().add(createFileLink("✂️ File Đã Ghép", fileMerged));
             }
 
-            // Tắt Live, Bật Playback
             view.liveViewPane.setVisible(false);
             view.playbackPane.setVisible(true);
 
-            // Xóa player cũ nếu có
             disposePlayers();
 
-            // Khởi tạo Player Pano
-            playerPano = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(filePano.toURI().toString()));
-            view.searchMediaViewPano.setMediaPlayer(playerPano);
+            if (filePano.exists()) {
+                playerPano = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(filePano.toURI().toString()));
+                view.searchMediaViewPano.setMediaPlayer(playerPano);
+                view.searchMediaViewPano.getParent().setVisible(true);
+            } else {
+                view.searchMediaViewPano.getParent().setVisible(false);
+            }
 
-            // Khởi tạo Player QR (Nếu tồn tại)
             if (fileQr.exists()) {
                 playerQr = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(fileQr.toURI().toString()));
                 view.searchMediaViewQr.setMediaPlayer(playerQr);
@@ -382,51 +430,49 @@ public class MainController {
                 view.searchMediaViewQr.getParent().setVisible(false);
             }
 
-            // Đồng bộ UI theo Player Pano (Lấy Pano làm chuẩn)
-            playerPano.setOnReady(() -> {
-                // CHỐNG CRASH: Chỉ lấy thời gian nếu player chưa bị hủy
-                if (playerPano != null) {
-                    view.timeSlider.setMax(playerPano.getTotalDuration().toSeconds());
-                }
-            });
+            javafx.scene.media.MediaPlayer masterPlayer = playerPano != null ? playerPano : playerQr;
 
-            playerPano.currentTimeProperty().addListener((obs, oldTime, newTime) -> {
-                // CHỐNG CRASH: Chỉ cập nhật thanh Slider nếu player còn tồn tại
-                if (playerPano != null) {
-                    if (!view.timeSlider.isValueChanging()) {
-                        view.timeSlider.setValue(newTime.toSeconds());
+            if (masterPlayer != null) {
+                masterPlayer.setOnReady(() -> {
+                    if (masterPlayer != null) {
+                        view.timeSlider.setMax(masterPlayer.getTotalDuration().toSeconds());
                     }
-                    String currentStr = formatTime(newTime.toSeconds());
-                    String totalStr = formatTime(playerPano.getTotalDuration().toSeconds());
-                    view.timeLabel.setText(currentStr + " / " + totalStr);
-                }
-            });
+                });
 
-            playerPano.setOnEndOfMedia(() -> {
-                view.playPauseBtn.setText("🔄 Phát lại");
-                // CHỐNG CRASH: Kiểm tra trước khi gọi hàm pause()
-                if (playerPano != null) playerPano.pause();
-                if (playerQr != null) playerQr.pause();
-            });
+                masterPlayer.currentTimeProperty().addListener((obs, oldTime, newTime) -> {
+                    if (masterPlayer != null) {
+                        if (!view.timeSlider.isValueChanging()) {
+                            view.timeSlider.setValue(newTime.toSeconds());
+                        }
+                        String currentStr = formatTime(newTime.toSeconds());
+                        String totalStr = formatTime(masterPlayer.getTotalDuration().toSeconds());
+                        view.timeLabel.setText(currentStr + " / " + totalStr);
+                    }
+                });
 
-            // Tự động phát khi tìm thấy
-            view.playPauseBtn.setText("⏸ Tạm dừng");
-            playerPano.play();
-            if (playerQr != null) playerQr.play();
+                masterPlayer.setOnEndOfMedia(() -> {
+                    view.playPauseBtn.setText("🔄 Phát lại");
+                    if (playerPano != null) playerPano.pause();
+                    if (playerQr != null) playerQr.pause();
+                });
+
+                view.playPauseBtn.setText("⏸ Tạm dừng");
+                if (playerPano != null) playerPano.play();
+                if (playerQr != null) playerQr.play();
+            }
 
         } else {
-            Alert a = new Alert(Alert.AlertType.WARNING, "Không tìm thấy video toàn cảnh cho mã: " + code);
+            Alert a = new Alert(Alert.AlertType.WARNING, "Không tìm thấy video nào cho mã: " + code);
             a.show();
         }
     }
-    // Hàm tạo link, click vào sẽ tự động mở thư mục và bôi đen file đó
+
     private javafx.scene.control.Hyperlink createFileLink(String title, java.io.File file) {
         javafx.scene.control.Hyperlink link = new javafx.scene.control.Hyperlink(title + " (" + file.getName() + ")");
-        link.setTextFill(Color.web("#89b4fa")); // Màu xanh dương nhạt
+        link.setTextFill(Color.web("#89b4fa"));
         link.setFont(javafx.scene.text.Font.font(13));
         link.setOnAction(e -> {
             try {
-                // Lệnh CMD của Windows để mở thư mục và select file
                 Runtime.getRuntime().exec("explorer.exe /select,\"" + file.getAbsolutePath() + "\"");
             } catch (Exception ex) {
                 ex.printStackTrace();
@@ -434,24 +480,25 @@ public class MainController {
         });
         return link;
     }
-    private void togglePlayback() {
-        if (playerPano == null) return;
 
-        // Nếu đang ở cuối video (Nút hiển thị Phát lại) -> Tua về đầu và phát
+    private void togglePlayback() {
+        javafx.scene.media.MediaPlayer masterPlayer = playerPano != null ? playerPano : playerQr;
+        if (masterPlayer == null) return;
+
         if (view.playPauseBtn.getText().contains("Phát lại")) {
             seekVideo(0);
-            playerPano.play();
+            if (playerPano != null) playerPano.play();
             if (playerQr != null) playerQr.play();
             view.playPauseBtn.setText("⏸ Tạm dừng");
             return;
         }
 
-        if (playerPano.getStatus() == javafx.scene.media.MediaPlayer.Status.PLAYING) {
-            playerPano.pause();
+        if (masterPlayer.getStatus() == javafx.scene.media.MediaPlayer.Status.PLAYING) {
+            if (playerPano != null) playerPano.pause();
             if (playerQr != null) playerQr.pause();
             view.playPauseBtn.setText("▶ Phát");
         } else {
-            playerPano.play();
+            if (playerPano != null) playerPano.play();
             if (playerQr != null) playerQr.play();
             view.playPauseBtn.setText("⏸ Tạm dừng");
         }
@@ -471,8 +518,16 @@ public class MainController {
     }
 
     private void disposePlayers() {
-        if (playerPano != null) { playerPano.stop(); playerPano.dispose(); playerPano = null; }
-        if (playerQr != null) { playerQr.stop(); playerQr.dispose(); playerQr = null; }
+        if (playerPano != null) {
+            playerPano.stop();
+            playerPano.dispose();
+            playerPano = null;
+        }
+        if (playerQr != null) {
+            playerQr.stop();
+            playerQr.dispose();
+            playerQr = null;
+        }
     }
 
     private String formatTime(double totalSeconds) {
@@ -489,13 +544,13 @@ public class MainController {
         view.mergeVideoBtn.setText("⏳ Đang ghép...");
         view.mergeVideoBtn.setDisable(true);
 
-        // Tạm dừng video nếu đang phát
-        if (playerPano != null && playerPano.getStatus() == javafx.scene.media.MediaPlayer.Status.PLAYING) {
+        javafx.scene.media.MediaPlayer masterPlayer = playerPano != null ? playerPano : playerQr;
+        if (masterPlayer != null && masterPlayer.getStatus() == javafx.scene.media.MediaPlayer.Status.PLAYING) {
             togglePlayback();
         }
 
         OrderRecord tempRecord = new OrderRecord(code);
-        String dir = "D:\\Quang-Wordspace\\Guard-Cam-FX\\videos\\";
+        String dir = System.getProperty("user.dir") + java.io.File.separator + "videos" + java.io.File.separator;
         tempRecord.setPanoVideoPath(dir + code + "_pano.mp4");
         tempRecord.setQrVideoPath(dir + code + "_qr.mp4");
 
@@ -503,28 +558,48 @@ public class MainController {
             Platform.runLater(() -> {
                 view.mergeVideoBtn.setText("✂️ Ghép thành 1 File");
                 view.mergeVideoBtn.setDisable(false);
+
+                java.io.File fileMerged = new java.io.File(tempRecord.getMergedVideoPath());
+                if (fileMerged.exists()) {
+                    boolean alreadyHasMerged = view.pathBoxContainer.getChildren().stream()
+                            .filter(node -> node instanceof javafx.scene.control.Hyperlink)
+                            .anyMatch(node -> ((javafx.scene.control.Hyperlink) node).getText().contains("File Đã Ghép"));
+                    if (!alreadyHasMerged) {
+                        view.pathBoxContainer.getChildren().add(createFileLink("✂️ File Đã Ghép", fileMerged));
+                    }
+                }
+
                 Alert a = new Alert(Alert.AlertType.INFORMATION, "Ghép thành công! Đã lưu tại:\n" + tempRecord.getMergedVideoPath());
                 a.show();
             });
         });
     }
 
-    private void shutdownSystem() {
+    private void stopCameraSystem() {
         isSystemRunning = false;
+        isPanoWorking = false;
+        isQrWorking = false;
+
         stopCurrentRecording();
         panoCamManager.stopCamera();
         qrCamManager.stopCamera();
 
-        view.startCamBtn.setText("▶ BẬT HỆ THỐNG");
-        view.startCamBtn.setStyle("-fx-background-color: #3b82f6; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 12px; -fx-background-radius: 6px;");
+        view.qrContainer.setVisible(false);
+        view.overlayText.setVisible(false);
+
+        view.startCamBtn.setText("▶ BẮT ĐẦU GHI HÌNH");
+        view.startCamBtn.setStyle("-fx-background-color: #3b82f6; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10px; -fx-background-radius: 6px;");
         updateUiStatus("CHƯA KẾT NỐI", "#a6adc8");
+
+        view.scanIndicator.setText("Mắt AI: Đang tắt");
+        view.scanIndicator.setTextFill(Color.web("#cbd5e1"));
+
         view.cameraView.setImage(null);
         view.cameraQrView.setImage(null);
-        //view.aimBox.setVisible(false);
     }
 
     public void shutdown() {
-        shutdownSystem();
+        stopCameraSystem();
         scannerThreadPool.shutdown();
         timerThreadPool.shutdown();
     }
@@ -538,7 +613,6 @@ public class MainController {
 
     private void handleCameraError(String camName, Exception e) {
         Platform.runLater(() -> {
-            shutdownSystem();
             Alert a = new Alert(Alert.AlertType.ERROR, "Lỗi kết nối " + camName + ": " + e.getMessage());
             a.show();
         });
@@ -564,7 +638,8 @@ public class MainController {
                 sdl.drain();
                 sdl.stop();
                 sdl.close();
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
         }).start();
     }
 }

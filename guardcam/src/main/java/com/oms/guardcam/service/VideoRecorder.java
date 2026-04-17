@@ -1,21 +1,15 @@
 package com.oms.guardcam.service;
 
 import com.oms.guardcam.model.OrderRecord;
-import com.oms.guardcam.util.ImageUtils;
 import org.bytedeco.ffmpeg.global.avcodec;
 import org.bytedeco.ffmpeg.global.avutil;
-import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.Frame;
-import org.bytedeco.opencv.global.opencv_imgproc;
-import org.bytedeco.opencv.opencv_core.Mat;
-import org.bytedeco.opencv.opencv_core.Rect;
-import org.bytedeco.opencv.opencv_core.Size;
 
 import java.io.File;
 
 public class VideoRecorder {
-    private final String SAVE_DIR = "D:\\Quang-Wordspace\\Guard-Cam-FX\\videos\\";
+    private final String SAVE_DIR = System.getProperty("user.dir") + java.io.File.separator + "videos" + java.io.File.separator;
     private FFmpegFrameRecorder recorderPano;
     private FFmpegFrameRecorder recorderQr;
     private final Object lock = new Object();
@@ -25,21 +19,27 @@ public class VideoRecorder {
         new File(SAVE_DIR).mkdirs();
     }
 
-    public void startDualRecording(OrderRecord order, int panoW, int panoH, int qrW, int qrH) {
+    public void startDualRecording(OrderRecord order, int panoW, int panoH, int qrW, int qrH, boolean usePano, boolean useQr) {
         synchronized (lock) {
             try {
                 order.setPanoVideoPath(SAVE_DIR + order.getTrackingCode() + "_pano.mp4");
                 order.setQrVideoPath(SAVE_DIR + order.getTrackingCode() + "_qr.mp4");
 
-                // Config Recorder Toàn cảnh
-                recorderPano = new FFmpegFrameRecorder(order.getPanoVideoPath(), panoW, panoH);
-                setupRecorder(recorderPano);
-                recorderPano.start();
+                if (usePano) {
+                    recorderPano = new FFmpegFrameRecorder(order.getPanoVideoPath(), panoW, panoH);
+                    setupLiveRecorder(recorderPano);
+                    recorderPano.start();
+                } else {
+                    recorderPano = null;
+                }
 
-                // Config Recorder QR
-                recorderQr = new FFmpegFrameRecorder(order.getQrVideoPath(), qrW, qrH);
-                setupRecorder(recorderQr);
-                recorderQr.start();
+                if (useQr) {
+                    recorderQr = new FFmpegFrameRecorder(order.getQrVideoPath(), qrW, qrH);
+                    setupLiveRecorder(recorderQr);
+                    recorderQr.start();
+                } else {
+                    recorderQr = null;
+                }
 
                 isRecording = true;
             } catch (Exception e) {
@@ -48,22 +48,37 @@ public class VideoRecorder {
         }
     }
 
-    private void setupRecorder(FFmpegFrameRecorder r) {
+    // 1. CẤU HÌNH QUAY TRỰC TIẾP: Cân bằng để không lag máy nhưng vẫn nét
+    private void setupLiveRecorder(FFmpegFrameRecorder r) {
         r.setVideoCodec(avcodec.AV_CODEC_ID_H264);
         r.setFormat("mp4");
         r.setFrameRate(30);
-        r.setVideoOption("preset", "veryfast"); // Optimize for real-time CPU encoding
-        r.setVideoOption("crf", "18"); // Đổi từ 23 về 18 hoặc 15 để video cực nét
-        r.setVideoBitrate(15000000);   // Có thể tăng thêm bitrate lên 15Mbps
-        r.setVideoOption("profile", "main");
-        r.setVideoOption("level", "3.1");
+        r.setVideoOption("preset", "veryfast"); // Tốc độ nén nhanh
+        r.setVideoOption("crf", "18"); // Độ nét cao
+        r.setVideoQuality(0); // LỆNH BẮT BUỘC: Xóa bỏ mọi giới hạn mờ ảnh do Bitrate
+        r.setVideoOption("profile", "high");
+        r.setPixelFormat(avutil.AV_PIX_FMT_YUV420P);
+    }
+
+    // 2. CẤU HÌNH GHÉP VIDEO: ÉP CHẤT LƯỢNG CAO NHẤT (LOSSLESS)
+    private void setupMergeRecorder(FFmpegFrameRecorder r, double originalFps) {
+        r.setVideoCodec(avcodec.AV_CODEC_ID_H264);
+        r.setFormat("mp4");
+        r.setFrameRate(originalFps); // Khớp chuẩn 100% FPS với video gốc
+        r.setVideoOption("preset", "medium"); // Ép CPU nén kỹ, cẩn thận từng Pixel
+        r.setVideoOption("crf", "14"); // 14 là ngưỡng video siêu nét không tì vết
+        r.setVideoQuality(0); // LỆNH BẮT BUỘC: Không cho phép FFmpeg tự động giảm chất lượng
+        r.setVideoOption("profile", "high");
         r.setPixelFormat(avutil.AV_PIX_FMT_YUV420P);
     }
 
     public void recordPanoFrame(Frame frame) {
         synchronized (lock) {
             if (isRecording && recorderPano != null) {
-                try { recorderPano.record(frame); } catch (Exception ignored) {}
+                try {
+                    recorderPano.record(frame);
+                } catch (Exception ignored) {
+                }
             }
         }
     }
@@ -71,21 +86,24 @@ public class VideoRecorder {
     public void recordQrFrame(Frame frame) {
         synchronized (lock) {
             if (isRecording && recorderQr != null) {
-                try { recorderQr.record(frame); } catch (Exception ignored) {}
+                try {
+                    recorderQr.record(frame);
+                } catch (Exception ignored) {
+                }
             }
         }
     }
 
     public void stopRecording() {
         synchronized (lock) {
-            if (!isRecording) return; // Chống Crash nếu vô tình gọi hàm này 2 lần
-            isRecording = false;      // Ngắt cờ ngay lập tức để block mọi frame mới bay vào
+            if (!isRecording) return;
+            isRecording = false;
 
             try {
                 if (recorderPano != null) {
                     recorderPano.stop();
                     recorderPano.release();
-                    recorderPano = null; // BẮT BUỘC CÓ: Xóa dấu vết con trỏ C++
+                    recorderPano = null;
                 }
             } catch (Exception e) {
                 e.printStackTrace();
@@ -95,7 +113,7 @@ public class VideoRecorder {
                 if (recorderQr != null) {
                     recorderQr.stop();
                     recorderQr.release();
-                    recorderQr = null; // BẮT BUỘC CÓ: Xóa dấu vết con trỏ C++
+                    recorderQr = null;
                 }
             } catch (Exception e) {
                 e.printStackTrace();
@@ -103,7 +121,6 @@ public class VideoRecorder {
         }
     }
 
-    // Tính năng chèn Picture-in-Picture khi xem lại
     public void mergeDualCamVideos(OrderRecord order, Runnable onComplete) {
         order.setMergedVideoPath(SAVE_DIR + order.getTrackingCode() + "_merged.mp4");
 
@@ -111,26 +128,26 @@ public class VideoRecorder {
             try (org.bytedeco.javacv.FFmpegFrameGrabber gPano = new org.bytedeco.javacv.FFmpegFrameGrabber(order.getPanoVideoPath());
                  org.bytedeco.javacv.FFmpegFrameGrabber gQr = new org.bytedeco.javacv.FFmpegFrameGrabber(order.getQrVideoPath())) {
 
-                // 1. Ép chung hệ màu BGR24 để OpenCV chắc chắn cho phép vẽ đè
                 gPano.setPixelFormat(org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR24);
                 gQr.setPixelFormat(org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR24);
 
                 gPano.start();
                 gQr.start();
 
+                // Lấy chính xác tốc độ khung hình (FPS) từ video gốc
+                double fps = gPano.getFrameRate();
+                if (fps <= 0) fps = 30;
+
                 org.bytedeco.javacv.FFmpegFrameRecorder r = new org.bytedeco.javacv.FFmpegFrameRecorder(order.getMergedVideoPath(), gPano.getImageWidth(), gPano.getImageHeight());
-                setupRecorder(r);
+
+                // Gọi cấu hình LOSSLESS
+                setupMergeRecorder(r, fps);
                 r.start();
 
-                // =========================================================
-                // FIX LỖI TÀNG HÌNH: TẠO 2 BỘ CONVERTER ĐỘC LẬP
-                // Không dùng ImageUtils ở đây để tránh bị ghi đè bộ nhớ đệm
-                // =========================================================
                 org.bytedeco.javacv.OpenCVFrameConverter.ToMat convPano = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
                 org.bytedeco.javacv.OpenCVFrameConverter.ToMat convQr = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
 
                 org.bytedeco.javacv.Frame fPano;
-                // Chỉ lấy hình ảnh (grabImage) để chống lỗi NullPointerException của âm thanh
                 while ((fPano = gPano.grabImage()) != null) {
                     org.bytedeco.javacv.Frame fQr = gQr.grabImage();
 
@@ -139,7 +156,6 @@ public class VideoRecorder {
                         continue;
                     }
 
-                    // Ép sang Mat qua 2 "ống" độc lập, không xâm phạm nhau
                     org.bytedeco.opencv.opencv_core.Mat matPano = convPano.convert(fPano);
                     org.bytedeco.opencv.opencv_core.Mat matQr = convQr.convert(fQr);
 
@@ -148,23 +164,37 @@ public class VideoRecorder {
                         continue;
                     }
 
-                    // Thu nhỏ QR bằng 1/6 chiều rộng Pano
-                    int smallW = matPano.cols() / 6;
+                    // Kích thước ô QR: 1/8 màn hình
+                    int smallW = matPano.cols() / 8;
                     int smallH = (matQr.rows() * smallW) / matQr.cols();
 
-                    org.bytedeco.opencv.opencv_core.Mat smallResized = new org.bytedeco.opencv.opencv_core.Mat();
-                    org.bytedeco.opencv.global.opencv_imgproc.resize(matQr, smallResized, new org.bytedeco.opencv.opencv_core.Size(smallW, smallH));
+                    org.bytedeco.opencv.opencv_core.Mat smallResized = null;
+                    org.bytedeco.opencv.opencv_core.Mat roi = null;
 
-                    // Tọa độ góc phải dưới (cách lề 20px)
-                    int posX = matPano.cols() - smallW - 20;
-                    int posY = matPano.rows() - smallH - 20;
+                    try {
+                        smallResized = new org.bytedeco.opencv.opencv_core.Mat();
+                        // Dùng INTER_AREA để khử răng cưa và giữ tối đa độ nét khi thu nhỏ hình ảnh quét QR
+                        org.bytedeco.opencv.global.opencv_imgproc.resize(
+                                matQr,
+                                smallResized,
+                                new org.bytedeco.opencv.opencv_core.Size(smallW, smallH),
+                                0,
+                                0,
+                                org.bytedeco.opencv.global.opencv_imgproc.INTER_AREA
+                        );
 
-                    // Vẽ đè ảnh QR lên vùng (ROI) của ảnh Pano
-                    org.bytedeco.opencv.opencv_core.Mat roi = matPano.apply(new org.bytedeco.opencv.opencv_core.Rect(posX, posY, smallW, smallH));
-                    smallResized.copyTo(roi);
+                        int posX = matPano.cols() - smallW - 20;
+                        int posY = matPano.rows() - smallH - 20;
 
-                    // Đóng gói lại bằng ống của Pano và lưu
-                    r.record(convPano.convert(matPano));
+                        roi = matPano.apply(new org.bytedeco.opencv.opencv_core.Rect(posX, posY, smallW, smallH));
+                        smallResized.copyTo(roi);
+
+                        r.record(convPano.convert(matPano));
+                    } finally {
+                        // GIẢI PHÓNG RAM
+                        if (smallResized != null) smallResized.close();
+                        if (roi != null) roi.close();
+                    }
                 }
                 r.stop();
                 if (onComplete != null) onComplete.run();
@@ -174,5 +204,8 @@ public class VideoRecorder {
             }
         }).start();
     }
-    public boolean isRecording() { return isRecording; }
+
+    public boolean isRecording() {
+        return isRecording;
+    }
 }

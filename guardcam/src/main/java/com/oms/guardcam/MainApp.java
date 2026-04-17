@@ -5,7 +5,10 @@ import com.oms.guardcam.view.MainView;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
+import javafx.scene.image.Image;
 import javafx.stage.Stage;
+
+import java.io.InputStream;
 
 public class MainApp extends Application {
 
@@ -23,9 +26,23 @@ public class MainApp extends Application {
         // 2. Khởi tạo Trình điều khiển (Gắn View vào Controller)
         MainController controller = new MainController(mainView);
 
-        // 3. Hiển thị
+        // 3. Hiển thị & Cấu hình Logo
         Scene scene = new Scene(mainView.getRoot(), 1366, 768);
         stage.setTitle("Order Guard Cam Pro - Enterprise Native");
+
+        // --- ĐOẠN CODE THÊM LOGO CHO CỬA SỔ ---
+        try {
+            InputStream iconStream = getClass().getResourceAsStream("/logo.png");
+            if (iconStream != null) {
+                stage.getIcons().add(new Image(iconStream));
+            } else {
+                System.out.println("Không tìm thấy file logo.png trong thư mục resources!");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        // -------------------------------------
+
         stage.setScene(scene);
         stage.setOnCloseRequest(e -> {
             controller.shutdown();
