@@ -14,7 +14,6 @@ public class VideoRecorder {
     private FFmpegFrameRecorder recorderQr;
     private final Object lock = new Object();
     private volatile boolean isRecording = false;
-
     public VideoRecorder() {
         new File(SAVE_DIR).mkdirs();
     }
@@ -22,11 +21,15 @@ public class VideoRecorder {
     public void startDualRecording(OrderRecord order, int panoW, int panoH, int qrW, int qrH, boolean usePano, boolean useQr) {
         synchronized (lock) {
             try {
+                java.io.File directory = new java.io.File(SAVE_DIR);
+                if (!directory.exists()) {
+                    directory.mkdirs();
+                }
                 order.setPanoVideoPath(SAVE_DIR + order.getTrackingCode() + "_pano.mp4");
                 order.setQrVideoPath(SAVE_DIR + order.getTrackingCode() + "_qr.mp4");
 
                 if (usePano) {
-                    recorderPano = new FFmpegFrameRecorder(order.getPanoVideoPath(), panoW, panoH);
+                    recorderPano = new FFmpegFrameRecorder(order.getPanoVideoPath() , panoW, panoH);
                     setupLiveRecorder(recorderPano);
                     recorderPano.start();
                 } else {
@@ -53,10 +56,22 @@ public class VideoRecorder {
         r.setVideoCodec(avcodec.AV_CODEC_ID_H264);
         r.setFormat("mp4");
         r.setFrameRate(30);
-        r.setVideoOption("preset", "veryfast"); // Tốc độ nén nhanh
-        r.setVideoOption("crf", "18"); // Độ nét cao
-        r.setVideoQuality(0); // LỆNH BẮT BUỘC: Xóa bỏ mọi giới hạn mờ ảnh do Bitrate
+
+        // 1. SỬA THÀNH 'veryfast': Đủ nhanh để không lag máy, nhưng nén kỹ hơn ultrafast để chống rỗ ảnh
+        r.setVideoOption("preset", "veryfast");
+
+        // 2. GIỮ NGUYÊN ĐỘ NÉT CAO (CRF + Bitrate)
+        r.setVideoOption("crf", "18");
+        r.setVideoBitrate(0);
+        r.setGopSize(60);
         r.setVideoOption("profile", "high");
+
+        // 3. TUYỆT ĐỐI KHÔNG DÙNG "zerolatency" KHI LƯU FILE MP4 LOCAL (Thủ phạm gây xước đĩa)
+        // r.setVideoOption("tune", "zerolatency"); <--- ĐÃ XÓA DÒNG NÀY
+
+        // 4. GIỮ GOP SIZE ĐỂ TẠO KHUNG CHUẨN ĐỀU ĐẶN
+        //r.setGopSize(30);
+
         r.setPixelFormat(avutil.AV_PIX_FMT_YUV420P);
     }
 
@@ -65,17 +80,22 @@ public class VideoRecorder {
         r.setVideoCodec(avcodec.AV_CODEC_ID_H264);
         r.setFormat("mp4");
         r.setFrameRate(originalFps); // Khớp chuẩn 100% FPS với video gốc
-        r.setVideoOption("preset", "medium"); // Ép CPU nén kỹ, cẩn thận từng Pixel
+        r.setVideoOption("preset", "fast"); // Ép CPU nén kỹ, cẩn thận từng Pixel
         r.setVideoOption("crf", "14"); // 14 là ngưỡng video siêu nét không tì vết
-        r.setVideoQuality(0); // LỆNH BẮT BUỘC: Không cho phép FFmpeg tự động giảm chất lượng
+        //r.setVideoQuality(0); // LỆNH BẮT BUỘC: Không cho phép FFmpeg tự động giảm chất lượng
+        r.setVideoBitrate(10000000);
         r.setVideoOption("profile", "high");
         r.setPixelFormat(avutil.AV_PIX_FMT_YUV420P);
     }
 
-    public void recordPanoFrame(Frame frame) {
+    // 1. SỬA HÀM PANO: Thêm biến captureTimeMillis
+    public void recordPanoFrame(Frame frame, long captureTimeMillis) {
         synchronized (lock) {
-            if (isRecording && recorderPano != null) {
+            if (isRecording && recorderPano != null && frame != null) {
                 try {
+                    // ĐÃ XÓA SẠCH LOGIC TÍNH TIMESTAMP (Không dùng setTimestamp nữa)
+                    // FFmpeg sẽ tự động sắp xếp khung hình đều tăm tắp theo đúng 30 FPS
+
                     recorderPano.record(frame);
                 } catch (Exception ignored) {
                 }
@@ -83,10 +103,12 @@ public class VideoRecorder {
         }
     }
 
-    public void recordQrFrame(Frame frame) {
+    // 2. SỬA HÀM QR: Thêm biến captureTimeMillis
+    public void recordQrFrame(Frame frame, long captureTimeMillis) {
         synchronized (lock) {
-            if (isRecording && recorderQr != null) {
+            if (isRecording && recorderQr != null && frame != null) {
                 try {
+                    // Tương tự, để FFmpeg tự lo thời gian
                     recorderQr.record(frame);
                 } catch (Exception ignored) {
                 }
@@ -148,54 +170,71 @@ public class VideoRecorder {
                 org.bytedeco.javacv.OpenCVFrameConverter.ToMat convQr = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
 
                 org.bytedeco.javacv.Frame fPano;
-                while ((fPano = gPano.grabImage()) != null) {
-                    org.bytedeco.javacv.Frame fQr = gQr.grabImage();
 
-                    if (fQr == null) {
-                        r.record(fPano);
-                        continue;
+                org.bytedeco.opencv.opencv_core.Mat lastValidQrMat = null;
+
+                try {
+                    while ((fPano = gPano.grabImage()) != null) {
+                        org.bytedeco.opencv.opencv_core.Mat matPano = convPano.convert(fPano);
+                        if (matPano == null || matPano.isNull()) continue;
+
+                        org.bytedeco.javacv.Frame fQr = gQr.grabImage();
+                        org.bytedeco.opencv.opencv_core.Mat matQr = null;
+
+                        if (fQr != null) {
+                            matQr = convQr.convert(fQr);
+                        }
+
+                        // Nếu chộp được ảnh QR chuẩn, cập nhật lại biến Cache
+                        if (matQr != null && !matQr.isNull()) {
+                            if (lastValidQrMat != null) lastValidQrMat.close(); // Dọn rác ảnh cũ
+                            lastValidQrMat = matQr.clone(); // Lưu ảnh mới
+                        }
+
+                        // LẤY ẢNH QR ĐỂ VẼ: Nếu ảnh hiện tại bị null, lấy ảnh cũ ra dùng
+                        org.bytedeco.opencv.opencv_core.Mat matQrToUse = (matQr != null && !matQr.isNull()) ? matQr : lastValidQrMat;
+
+                        // Nếu video vừa mới bắt đầu mà vẫn chưa có ảnh QR nào, đành ghi nguyên Pano
+                        if (matQrToUse == null || matQrToUse.isNull()) {
+                            r.record(fPano);
+                            continue;
+                        }
+
+                        // Kích thước ô QR: 1/8 màn hình
+                        int smallW = matPano.cols() / 8;
+                        int smallH = (matQrToUse.rows() * smallW) / matQrToUse.cols();
+
+                        org.bytedeco.opencv.opencv_core.Mat smallResized = null;
+                        org.bytedeco.opencv.opencv_core.Mat roi = null;
+
+                        try {
+                            smallResized = new org.bytedeco.opencv.opencv_core.Mat();
+                            org.bytedeco.opencv.global.opencv_imgproc.resize(
+                                    matQrToUse,
+                                    smallResized,
+                                    new org.bytedeco.opencv.opencv_core.Size(smallW, smallH),
+                                    0,
+                                    0,
+                                    org.bytedeco.opencv.global.opencv_imgproc.INTER_AREA
+                            );
+
+                            int posX = matPano.cols() - smallW - 20;
+                            int posY = matPano.rows() - smallH - 20;
+
+                            roi = matPano.apply(new org.bytedeco.opencv.opencv_core.Rect(posX, posY, smallW, smallH));
+                            smallResized.copyTo(roi);
+
+                            r.record(convPano.convert(matPano));
+                        } finally {
+                            if (smallResized != null) smallResized.close();
+                            if (roi != null) roi.close();
+                        }
                     }
-
-                    org.bytedeco.opencv.opencv_core.Mat matPano = convPano.convert(fPano);
-                    org.bytedeco.opencv.opencv_core.Mat matQr = convQr.convert(fQr);
-
-                    if (matPano == null || matQr == null || matPano.isNull() || matQr.isNull()) {
-                        r.record(fPano);
-                        continue;
-                    }
-
-                    // Kích thước ô QR: 1/8 màn hình
-                    int smallW = matPano.cols() / 8;
-                    int smallH = (matQr.rows() * smallW) / matQr.cols();
-
-                    org.bytedeco.opencv.opencv_core.Mat smallResized = null;
-                    org.bytedeco.opencv.opencv_core.Mat roi = null;
-
-                    try {
-                        smallResized = new org.bytedeco.opencv.opencv_core.Mat();
-                        // Dùng INTER_AREA để khử răng cưa và giữ tối đa độ nét khi thu nhỏ hình ảnh quét QR
-                        org.bytedeco.opencv.global.opencv_imgproc.resize(
-                                matQr,
-                                smallResized,
-                                new org.bytedeco.opencv.opencv_core.Size(smallW, smallH),
-                                0,
-                                0,
-                                org.bytedeco.opencv.global.opencv_imgproc.INTER_AREA
-                        );
-
-                        int posX = matPano.cols() - smallW - 20;
-                        int posY = matPano.rows() - smallH - 20;
-
-                        roi = matPano.apply(new org.bytedeco.opencv.opencv_core.Rect(posX, posY, smallW, smallH));
-                        smallResized.copyTo(roi);
-
-                        r.record(convPano.convert(matPano));
-                    } finally {
-                        // GIẢI PHÓNG RAM
-                        if (smallResized != null) smallResized.close();
-                        if (roi != null) roi.close();
-                    }
+                } finally {
+                    // Dọn dẹp RAM của ảnh Cache sau khi merge xong
+                    if (lastValidQrMat != null) lastValidQrMat.close();
                 }
+
                 r.stop();
                 if (onComplete != null) onComplete.run();
 

@@ -49,7 +49,19 @@ public class MainController {
 
     private javafx.scene.media.MediaPlayer playerPano;
     private javafx.scene.media.MediaPlayer playerQr;
+    private volatile boolean isUiUpdatingPano = false;
+    private volatile boolean isUiUpdatingQr = false;
 
+    // Giữ lại 2 biến toàn cục này để dùng lúc quay video
+    private int camWidth = 1920;
+    private int camHeight = 1080;
+    // Tạo 2 luồng ngầm xếp hàng tuần tự để ghi video
+    private final java.util.concurrent.ExecutorService panoRecordExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.ExecutorService qrRecordExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    // Khai báo 2 bộ chuyển đổi độc lập (Bắt buộc để chống crash khi chạy đa luồng)
+    private final org.bytedeco.javacv.OpenCVFrameConverter.ToMat panoRecordConverter = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
+    private final org.bytedeco.javacv.OpenCVFrameConverter.ToMat qrRecordConverter = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
     public MainController(MainView view) {
         this.view = view;
 
@@ -83,6 +95,7 @@ public class MainController {
             view.cameraQrSelect.getSelectionModel().select(prefs.get("camQr", view.cameraQrSelect.getItems().get(view.cameraQrSelect.getItems().size() - 1)));
         }
         view.autoStopSelect.getSelectionModel().select(prefs.getInt("autoStop", 1));
+        view.resSelect.getSelectionModel().select(prefs.getInt("resIndex", 0));
     }
 
     private void saveSettings() {
@@ -90,7 +103,7 @@ public class MainController {
         prefs.put("camPano", view.cameraPanoSelect.getValue() != null ? view.cameraPanoSelect.getValue() : "0");
         prefs.put("camQr", view.cameraQrSelect.getValue() != null ? view.cameraQrSelect.getValue() : "0");
         prefs.putInt("autoStop", view.autoStopSelect.getSelectionModel().getSelectedIndex());
-
+        prefs.putInt("resIndex", view.resSelect.getSelectionModel().getSelectedIndex());
         Alert a = new Alert(Alert.AlertType.INFORMATION, "Đã lưu cấu hình Camera thành công!");
         a.show();
     }
@@ -144,13 +157,15 @@ public class MainController {
 
         String panoCamName = view.cameraPanoSelect.getValue();
         String qrCamName = view.cameraQrSelect.getValue();
-
+        boolean is1080p = view.resSelect.getValue() == null || view.resSelect.getValue().equals("1920x1080");
+        camWidth = is1080p ? 1920 : 1280;
+        camHeight = is1080p ? 1080 : 720;
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat panoToMat = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat panoToFrame = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.JavaFXFrameConverter panoFx = new org.bytedeco.javacv.JavaFXFrameConverter();
 
         isPanoWorking = true;
-        panoCamManager.startCamera(panoCamName, 1920, 1080, new CameraManager.FrameListener() {
+        panoCamManager.startCamera(panoCamName, camWidth, camHeight, new CameraManager.FrameListener() {
             @Override
             public void onFrameCaptured(org.bytedeco.javacv.Frame frame, long timestamp) {
                 org.bytedeco.opencv.opencv_core.Mat panoMat = null;
@@ -172,12 +187,31 @@ public class MainController {
                     }
 
                     org.bytedeco.javacv.Frame drawnFrame = panoToFrame.convert(panoMat);
-                    javafx.scene.image.Image panoImg = panoFx.convert(drawnFrame);
+                    if (!isUiUpdatingPano) {
+                        isUiUpdatingPano = true;
+                        javafx.scene.image.Image panoImg = panoFx.convert(drawnFrame);
+                        Platform.runLater(() -> {
+                            view.cameraView.setImage(panoImg);
+                            isUiUpdatingPano = false;
+                        });
+                    }
 
-                    Platform.runLater(() -> view.cameraView.setImage(panoImg));
-
+                    // Sửa lại đoạn ghi video Pano
                     if (videoRecorder.isRecording() && isPanoWorking) {
-                        videoRecorder.recordPanoFrame(drawnFrame);
+                        // 1. CHỐT THỜI GIAN NGAY TẠI ĐÂY (Lúc ảnh vừa ra khỏi camera)
+                        long captureTime = System.currentTimeMillis();
+
+                        org.bytedeco.opencv.opencv_core.Mat recordMat = panoMat.clone();
+                        panoRecordExecutor.submit(() -> {
+                            try {
+                                // 2. TRUYỀN THỜI GIAN ĐÃ CHỐT VÀO HÀM
+                                videoRecorder.recordPanoFrame(panoRecordConverter.convert(recordMat), captureTime);
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            } finally {
+                                recordMat.close();
+                            }
+                        });
                     }
                 } finally {
                     // DỌN RÁC NGAY LẬP TỨC: NGĂN CHẶN TRÀN 6GB RAM
@@ -194,7 +228,7 @@ public class MainController {
         });
 
         isQrWorking = true;
-        qrCamManager.startCamera(qrCamName, 1280, 720, new CameraManager.FrameListener() {
+        qrCamManager.startCamera(qrCamName, camWidth, camHeight, new CameraManager.FrameListener() {
             @Override
             public void onFrameCaptured(org.bytedeco.javacv.Frame frame, long timestamp) {
                 org.bytedeco.opencv.opencv_core.Mat cleanMat = null;
@@ -208,18 +242,41 @@ public class MainController {
 
                     org.bytedeco.javacv.Frame cleanFrame = toFrameConverter.convert(cleanMat);
 
+                    // Sửa lại đoạn ghi video QR (Dùng cleanMat để video lưu không bị dính nét vẽ UI)
+                    // Sửa lại đoạn gửi video QR trong onFrameCaptured
                     if (videoRecorder.isRecording() && isQrWorking) {
-                        videoRecorder.recordQrFrame(cleanFrame);
+                        // 1. CHỐT THỜI GIAN NGAY TẠI ĐÂY
+                        long captureTime = System.currentTimeMillis();
+
+                        org.bytedeco.opencv.opencv_core.Mat recordMat = cleanMat.clone();
+                        qrRecordExecutor.submit(() -> {
+                            try {
+                                // 2. TRUYỀN THỜI GIAN ĐÃ CHỐT VÀO HÀM
+                                videoRecorder.recordQrFrame(qrRecordConverter.convert(recordMat), captureTime);
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            } finally {
+                                recordMat.close();
+                            }
+                        });
                     }
 
                     // Cấp phát bộ nhớ -> BẮT BUỘC PHẢI CLOSE
-                    uiMat = cleanMat.clone();
-                    if (lastDetectedPoints != null && (System.currentTimeMillis() - lastDetectionTime < 500)) {
-                        drawBoundingBox(uiMat, lastDetectedPoints);
+                    if (!isUiUpdatingQr) {
+                        isUiUpdatingQr = true;
+                        uiMat = cleanMat.clone();
+                        if (lastDetectedPoints != null && (System.currentTimeMillis() - lastDetectionTime < 500)) {
+                            drawBoundingBox(uiMat, lastDetectedPoints);
+                        }
+                        javafx.scene.image.Image uiImg = fxConverter.convert(toFrameConverter.convert(uiMat));
+                        Platform.runLater(() -> {
+                            view.cameraQrView.setImage(uiImg);
+                            isUiUpdatingQr = false;
+                        });
+                    } else {
+                        // Nếu UI đang bận, vẫn cần rác phải được dọn
+                        uiMat = null;
                     }
-
-                    javafx.scene.image.Image uiImg = fxConverter.convert(toFrameConverter.convert(uiMat));
-                    Platform.runLater(() -> view.cameraQrView.setImage(uiImg));
 
                     if (!isScanning) {
                         scanFrameCounter++;
@@ -317,7 +374,7 @@ public class MainController {
             view.barcodeInput.clear();
         });
 
-        videoRecorder.startDualRecording(currentOrder, 1920, 1080, 720, 1280, isPanoWorking, isQrWorking);
+        videoRecorder.startDualRecording(currentOrder, camWidth, camHeight, camHeight, camWidth, isPanoWorking, isQrWorking);
 
         int stopIndex = view.autoStopSelect.getSelectionModel().getSelectedIndex();
         if (stopIndex != 3) {

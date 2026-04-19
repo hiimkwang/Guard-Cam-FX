@@ -59,7 +59,7 @@ public class MainView {
         VBox configPanel = createPanel("⚙ Cấu hình Cam");
 
         cameraPanoSelect = new ComboBox<>();
-        cameraPanoSelect.setPromptText("Chọn Cam Toàn Cảnh (Pano)");
+        cameraPanoSelect.setPromptText(" Chọn Cam Toàn Cảnh (Pano)");
         styleControl(cameraPanoSelect);
 
         cameraQrSelect = new ComboBox<>();
@@ -94,6 +94,10 @@ public class MainView {
                     setTextFill(Color.web("#a6adc8"));
                 }},
                 cameraQrSelect,
+                new Label("🖥️ Độ phân giải Camera:") {{
+                    setTextFill(Color.web("#a6adc8"));
+                }},
+                resSelect,
                 new Label("⏱ Tự ngắt video sau:") {{
                     setTextFill(Color.web("#a6adc8"));
                 }},
