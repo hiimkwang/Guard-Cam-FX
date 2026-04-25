@@ -52,6 +52,7 @@ public class MainController {
     private volatile boolean isUiUpdatingPano = false;
     private volatile boolean isUiUpdatingQr = false;
 
+    private volatile long systemStartNano = -1;
     // Giữ lại 2 biến toàn cục này để dùng lúc quay video
     private int camWidth = 1920;
     private int camHeight = 1080;
@@ -198,14 +199,16 @@ public class MainController {
 
                     // Sửa lại đoạn ghi video Pano
                     if (videoRecorder.isRecording() && isPanoWorking) {
-                        // 1. CHỐT THỜI GIAN NGAY TẠI ĐÂY (Lúc ảnh vừa ra khỏi camera)
-                        long captureTime = System.currentTimeMillis();
+                        // Chốt mốc thời gian duy nhất của toàn hệ thống
+                        if (systemStartNano == -1) systemStartNano = System.nanoTime();
+
+                        // Tự tính thời gian trôi qua (Micro-giây) cực kỳ chính xác
+                        long timestampMicro = (System.nanoTime() - systemStartNano) / 1000L;
 
                         org.bytedeco.opencv.opencv_core.Mat recordMat = panoMat.clone();
                         panoRecordExecutor.submit(() -> {
                             try {
-                                // 2. TRUYỀN THỜI GIAN ĐÃ CHỐT VÀO HÀM
-                                videoRecorder.recordPanoFrame(panoRecordConverter.convert(recordMat), captureTime);
+                                videoRecorder.recordPanoFrame(panoRecordConverter.convert(recordMat), timestampMicro);
                             } catch (Exception e) {
                                 e.printStackTrace();
                             } finally {
@@ -243,16 +246,16 @@ public class MainController {
                     org.bytedeco.javacv.Frame cleanFrame = toFrameConverter.convert(cleanMat);
 
                     // Sửa lại đoạn ghi video QR (Dùng cleanMat để video lưu không bị dính nét vẽ UI)
-                    // Sửa lại đoạn gửi video QR trong onFrameCaptured
                     if (videoRecorder.isRecording() && isQrWorking) {
-                        // 1. CHỐT THỜI GIAN NGAY TẠI ĐÂY
-                        long captureTime = System.currentTimeMillis();
+                        // Dùng chung mốc thời gian với Pano để đồng bộ tuyệt đối
+                        if (systemStartNano == -1) systemStartNano = System.nanoTime();
+
+                        long timestampMicro = (System.nanoTime() - systemStartNano) / 1000L;
 
                         org.bytedeco.opencv.opencv_core.Mat recordMat = cleanMat.clone();
                         qrRecordExecutor.submit(() -> {
                             try {
-                                // 2. TRUYỀN THỜI GIAN ĐÃ CHỐT VÀO HÀM
-                                videoRecorder.recordQrFrame(qrRecordConverter.convert(recordMat), captureTime);
+                                videoRecorder.recordQrFrame(qrRecordConverter.convert(recordMat), timestampMicro);
                             } catch (Exception e) {
                                 e.printStackTrace();
                             } finally {
@@ -364,6 +367,7 @@ public class MainController {
     }
 
     private void startNewRecordingLogic(String trackingCode) {
+        systemStartNano = -1; // Reset lại đồng hồ
         currentOrder = new OrderRecord(trackingCode);
 
         Platform.runLater(() -> {
