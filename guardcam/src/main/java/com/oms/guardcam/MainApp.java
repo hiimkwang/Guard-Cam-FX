@@ -49,6 +49,7 @@ public class MainApp extends Application {
             Platform.exit();
             System.exit(0);
         });
+        //stage.setMaximized(true);
         stage.show();
     }
 }

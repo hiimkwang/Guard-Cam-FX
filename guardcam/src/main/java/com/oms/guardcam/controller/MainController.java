@@ -51,11 +51,14 @@ public class MainController {
     private javafx.scene.media.MediaPlayer playerQr;
     private volatile boolean isUiUpdatingPano = false;
     private volatile boolean isUiUpdatingQr = false;
-
+    private int panoWidth = 1920;
+    private int panoHeight = 1080;
+    private int qrWidth = 1280;
+    private int qrHeight = 720;
     private volatile long systemStartNano = -1;
     // Giữ lại 2 biến toàn cục này để dùng lúc quay video
-    private int camWidth = 1920;
-    private int camHeight = 1080;
+    //private int camWidth = 1920;
+    //private int camHeight = 1080;
     // Tạo 2 luồng ngầm xếp hàng tuần tự để ghi video
     private final java.util.concurrent.ExecutorService panoRecordExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
     private final java.util.concurrent.ExecutorService qrRecordExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -96,7 +99,8 @@ public class MainController {
             view.cameraQrSelect.getSelectionModel().select(prefs.get("camQr", view.cameraQrSelect.getItems().get(view.cameraQrSelect.getItems().size() - 1)));
         }
         view.autoStopSelect.getSelectionModel().select(prefs.getInt("autoStop", 1));
-        view.resSelect.getSelectionModel().select(prefs.getInt("resIndex", 0));
+        view.resPanoSelect.getSelectionModel().select(prefs.getInt("resPanoIndex", 0));
+        view.resQrSelect.getSelectionModel().select(prefs.getInt("resQrIndex", 1));
     }
 
     private void saveSettings() {
@@ -104,7 +108,8 @@ public class MainController {
         prefs.put("camPano", view.cameraPanoSelect.getValue() != null ? view.cameraPanoSelect.getValue() : "0");
         prefs.put("camQr", view.cameraQrSelect.getValue() != null ? view.cameraQrSelect.getValue() : "0");
         prefs.putInt("autoStop", view.autoStopSelect.getSelectionModel().getSelectedIndex());
-        prefs.putInt("resIndex", view.resSelect.getSelectionModel().getSelectedIndex());
+        prefs.putInt("resPanoIndex", view.resPanoSelect.getSelectionModel().getSelectedIndex());
+        prefs.putInt("resQrIndex", view.resQrSelect.getSelectionModel().getSelectedIndex());
         Alert a = new Alert(Alert.AlertType.INFORMATION, "Đã lưu cấu hình Camera thành công!");
         a.show();
     }
@@ -156,17 +161,20 @@ public class MainController {
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat toFrameConverter = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.JavaFXFrameConverter fxConverter = new org.bytedeco.javacv.JavaFXFrameConverter();
 
-        String panoCamName = view.cameraPanoSelect.getValue();
-        String qrCamName = view.cameraQrSelect.getValue();
-        boolean is1080p = view.resSelect.getValue() == null || view.resSelect.getValue().equals("1920x1080");
-        camWidth = is1080p ? 1920 : 1280;
-        camHeight = is1080p ? 1080 : 720;
+        boolean isPano1080 = view.resPanoSelect.getValue().equals("1920x1080");
+        panoWidth = isPano1080 ? 1920 : (view.resPanoSelect.getValue().equals("1280x720") ? 1280 : 640);
+        panoHeight = isPano1080 ? 1080 : (view.resPanoSelect.getValue().equals("1280x720") ? 720 : 480);
+
+        // Tính toán kích thước QR
+        boolean isQr1080 = view.resQrSelect.getValue().equals("1920x1080");
+        qrWidth = isQr1080 ? 1920 : (view.resQrSelect.getValue().equals("1280x720") ? 1280 : 640);
+        qrHeight = isQr1080 ? 1080 : (view.resQrSelect.getValue().equals("1280x720") ? 720 : 480);
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat panoToMat = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.OpenCVFrameConverter.ToMat panoToFrame = new org.bytedeco.javacv.OpenCVFrameConverter.ToMat();
         final org.bytedeco.javacv.JavaFXFrameConverter panoFx = new org.bytedeco.javacv.JavaFXFrameConverter();
 
         isPanoWorking = true;
-        panoCamManager.startCamera(panoCamName, camWidth, camHeight, new CameraManager.FrameListener() {
+        panoCamManager.startCamera(view.cameraPanoSelect.getValue(), panoWidth, panoHeight, new CameraManager.FrameListener() {
             @Override
             public void onFrameCaptured(org.bytedeco.javacv.Frame frame, long timestamp) {
                 org.bytedeco.opencv.opencv_core.Mat panoMat = null;
@@ -231,7 +239,7 @@ public class MainController {
         });
 
         isQrWorking = true;
-        qrCamManager.startCamera(qrCamName, camWidth, camHeight, new CameraManager.FrameListener() {
+        qrCamManager.startCamera(view.cameraQrSelect.getValue(), qrWidth, qrHeight, new CameraManager.FrameListener() {
             @Override
             public void onFrameCaptured(org.bytedeco.javacv.Frame frame, long timestamp) {
                 org.bytedeco.opencv.opencv_core.Mat cleanMat = null;
@@ -378,9 +386,8 @@ public class MainController {
             view.barcodeInput.clear();
         });
 
-        videoRecorder.startDualRecording(currentOrder, camWidth, camHeight, camHeight, camWidth, isPanoWorking, isQrWorking);
-
-        int stopIndex = view.autoStopSelect.getSelectionModel().getSelectedIndex();
+        // SỬA DÒNG NÀY: Truyền đúng biến kích thước của từng Cam vào
+        videoRecorder.startDualRecording(currentOrder, panoWidth, panoHeight, qrHeight, qrWidth, isPanoWorking, isQrWorking);        int stopIndex = view.autoStopSelect.getSelectionModel().getSelectedIndex();
         if (stopIndex != 3) {
             int delayMs = stopIndex == 0 ? 60000 : (stopIndex == 1 ? 90000 : 120000);
             String codeAtStart = trackingCode;
@@ -439,7 +446,7 @@ public class MainController {
 
         if (videoRecorder.isRecording() || isFlushingVideo) {
             Platform.runLater(() -> {
-                Alert a = new Alert(Alert.AlertType.WARNING, "Hệ thống đang xử lý và đóng gói Video.\nVui lòng đợi 2-3 giây rồi ấn tìm kiếm lại!");
+                Alert a = new Alert(Alert.AlertType.WARNING, "Hệ thống đang xử lý và đóng gói Video. Vui lòng đợi chút!");
                 a.show();
             });
             return;
@@ -448,66 +455,64 @@ public class MainController {
         String dir = System.getProperty("user.dir") + java.io.File.separator + "videos" + java.io.File.separator;
         java.io.File filePano = new java.io.File(dir + code + "_pano.mp4");
         java.io.File fileQr = new java.io.File(dir + code + "_qr.mp4");
+        java.io.File fileMerged = new java.io.File(dir + code + "_merged.mp4");
 
-        if (filePano.exists() || fileQr.exists()) {
+        if (filePano.exists() || fileQr.exists() || fileMerged.exists()) {
             view.pbTitle.setText("MÃ ĐƠN: " + code);
-
-            long lastModified = filePano.exists() ? filePano.lastModified() : fileQr.lastModified();
+            long lastModified = fileMerged.exists() ? fileMerged.lastModified() : (filePano.exists() ? filePano.lastModified() : fileQr.lastModified());
             view.pbTime.setText("🕒 Đóng gói: " + videoTimeFormat.format(lastModified));
 
-            long sizeMB = ((filePano.exists() ? filePano.length() : 0) + (fileQr.exists() ? fileQr.length() : 0)) / (1024 * 1024);
-            view.pbSize.setText("💾 Tổng dung lượng: " + sizeMB + " MB");
             view.pathBoxContainer.getChildren().clear();
-
-            if (filePano.exists()) {
-                view.pathBoxContainer.getChildren().add(createFileLink("📹 Cam Toàn Cảnh", filePano));
-            }
-            if (fileQr.exists()) {
-                view.pathBoxContainer.getChildren().add(createFileLink("📱 Cam Quét Mã", fileQr));
-            }
-            java.io.File fileMerged = new java.io.File(dir + code + "_merged.mp4");
-            if (fileMerged.exists()) {
-                view.pathBoxContainer.getChildren().add(createFileLink("✂️ File Đã Ghép", fileMerged));
-            }
+            if (filePano.exists()) view.pathBoxContainer.getChildren().add(createFileLink("📹 Cam Toàn Cảnh", filePano));
+            if (fileQr.exists()) view.pathBoxContainer.getChildren().add(createFileLink("📱 Cam Quét Mã", fileQr));
+            if (fileMerged.exists()) view.pathBoxContainer.getChildren().add(createFileLink("✂️ File Đã Ghép", fileMerged));
 
             view.liveViewPane.setVisible(false);
             view.playbackPane.setVisible(true);
 
             disposePlayers();
 
-            if (filePano.exists()) {
-                playerPano = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(filePano.toURI().toString()));
+            // QUAN TRỌNG: NẾU ĐÃ CÓ FILE GHÉP -> CHỈ PHÁT ĐÚNG 1 FILE VÀ ẨN KHUNG QR ĐI
+            if (fileMerged.exists()) {
+                playerPano = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(fileMerged.toURI().toString()));
                 view.searchMediaViewPano.setMediaPlayer(playerPano);
                 view.searchMediaViewPano.getParent().setVisible(true);
-            } else {
-                view.searchMediaViewPano.getParent().setVisible(false);
-            }
 
-            if (fileQr.exists()) {
-                playerQr = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(fileQr.toURI().toString()));
-                view.searchMediaViewQr.setMediaPlayer(playerQr);
-                view.searchMediaViewQr.getParent().setVisible(true);
-            } else {
+                // Ẩn hoàn toàn khung QR đi để không bị lẹm vào màn hình
                 view.searchMediaViewQr.getParent().setVisible(false);
+            } else {
+                if (filePano.exists()) {
+                    playerPano = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(filePano.toURI().toString()));
+                    view.searchMediaViewPano.setMediaPlayer(playerPano);
+                    view.searchMediaViewPano.getParent().setVisible(true);
+                } else {
+                    view.searchMediaViewPano.getParent().setVisible(false);
+                }
+
+                if (fileQr.exists()) {
+                    playerQr = new javafx.scene.media.MediaPlayer(new javafx.scene.media.Media(fileQr.toURI().toString()));
+                    view.searchMediaViewQr.setMediaPlayer(playerQr);
+
+                    // HIỆN khung QR lên khi bắt buộc phải xem 2 file rời
+                    view.searchMediaViewQr.getParent().setVisible(true);
+                } else {
+                    view.searchMediaViewQr.getParent().setVisible(false);
+                }
             }
 
+            // Gắn các sự kiện UI
             javafx.scene.media.MediaPlayer masterPlayer = playerPano != null ? playerPano : playerQr;
-
+            if (playerPano != null) playerPano.setMute(true);
+            if (playerQr != null) playerQr.setMute(true);
             if (masterPlayer != null) {
                 masterPlayer.setOnReady(() -> {
-                    if (masterPlayer != null) {
-                        view.timeSlider.setMax(masterPlayer.getTotalDuration().toSeconds());
-                    }
+                    if (masterPlayer != null) view.timeSlider.setMax(masterPlayer.getTotalDuration().toSeconds());
                 });
 
                 masterPlayer.currentTimeProperty().addListener((obs, oldTime, newTime) -> {
                     if (masterPlayer != null) {
-                        if (!view.timeSlider.isValueChanging()) {
-                            view.timeSlider.setValue(newTime.toSeconds());
-                        }
-                        String currentStr = formatTime(newTime.toSeconds());
-                        String totalStr = formatTime(masterPlayer.getTotalDuration().toSeconds());
-                        view.timeLabel.setText(currentStr + " / " + totalStr);
+                        if (!view.timeSlider.isValueChanging()) view.timeSlider.setValue(newTime.toSeconds());
+                        view.timeLabel.setText(formatTime(newTime.toSeconds()) + " / " + formatTime(masterPlayer.getTotalDuration().toSeconds()));
                     }
                 });
 
@@ -521,13 +526,39 @@ public class MainController {
                 if (playerPano != null) playerPano.play();
                 if (playerQr != null) playerQr.play();
             }
-
-        } else {
-            Alert a = new Alert(Alert.AlertType.WARNING, "Không tìm thấy video nào cho mã: " + code);
-            a.show();
         }
     }
 
+    private void handleMergeAction() {
+        String code = view.searchTrackingCode.getText().trim();
+        if (code.isEmpty()) return;
+
+        view.mergeVideoBtn.setText("⏳ Đang ghép...");
+        view.mergeVideoBtn.setDisable(true);
+
+        javafx.scene.media.MediaPlayer masterPlayer = playerPano != null ? playerPano : playerQr;
+        if (masterPlayer != null && masterPlayer.getStatus() == javafx.scene.media.MediaPlayer.Status.PLAYING) {
+            togglePlayback();
+        }
+
+        OrderRecord tempRecord = new OrderRecord(code);
+        String dir = System.getProperty("user.dir") + java.io.File.separator + "videos" + java.io.File.separator;
+        tempRecord.setPanoVideoPath(dir + code + "_pano.mp4");
+        tempRecord.setQrVideoPath(dir + code + "_qr.mp4");
+
+        videoRecorder.mergeDualCamVideos(tempRecord, () -> {
+            Platform.runLater(() -> {
+                view.mergeVideoBtn.setText("✂️ Ghép thành 1 File");
+                view.mergeVideoBtn.setDisable(false);
+
+                // QUAN TRỌNG: Gọi lại hàm Search để tự động load video Merge và XÓA Khung đen QR
+                handleSearchVideo();
+
+                Alert a = new Alert(Alert.AlertType.INFORMATION, "Ghép thành công! Đã chuyển sang phát file ghép.");
+                a.show();
+            });
+        });
+    }
     private javafx.scene.control.Hyperlink createFileLink(String title, java.io.File file) {
         javafx.scene.control.Hyperlink link = new javafx.scene.control.Hyperlink(title + " (" + file.getName() + ")");
         link.setTextFill(Color.web("#89b4fa"));
@@ -598,43 +629,43 @@ public class MainController {
         return String.format("%02d:%02d", minutes, seconds);
     }
 
-    private void handleMergeAction() {
-        String code = view.searchTrackingCode.getText().trim();
-        if (code.isEmpty()) return;
-
-        view.mergeVideoBtn.setText("⏳ Đang ghép...");
-        view.mergeVideoBtn.setDisable(true);
-
-        javafx.scene.media.MediaPlayer masterPlayer = playerPano != null ? playerPano : playerQr;
-        if (masterPlayer != null && masterPlayer.getStatus() == javafx.scene.media.MediaPlayer.Status.PLAYING) {
-            togglePlayback();
-        }
-
-        OrderRecord tempRecord = new OrderRecord(code);
-        String dir = System.getProperty("user.dir") + java.io.File.separator + "videos" + java.io.File.separator;
-        tempRecord.setPanoVideoPath(dir + code + "_pano.mp4");
-        tempRecord.setQrVideoPath(dir + code + "_qr.mp4");
-
-        videoRecorder.mergeDualCamVideos(tempRecord, () -> {
-            Platform.runLater(() -> {
-                view.mergeVideoBtn.setText("✂️ Ghép thành 1 File");
-                view.mergeVideoBtn.setDisable(false);
-
-                java.io.File fileMerged = new java.io.File(tempRecord.getMergedVideoPath());
-                if (fileMerged.exists()) {
-                    boolean alreadyHasMerged = view.pathBoxContainer.getChildren().stream()
-                            .filter(node -> node instanceof javafx.scene.control.Hyperlink)
-                            .anyMatch(node -> ((javafx.scene.control.Hyperlink) node).getText().contains("File Đã Ghép"));
-                    if (!alreadyHasMerged) {
-                        view.pathBoxContainer.getChildren().add(createFileLink("✂️ File Đã Ghép", fileMerged));
-                    }
-                }
-
-                Alert a = new Alert(Alert.AlertType.INFORMATION, "Ghép thành công! Đã lưu tại:\n" + tempRecord.getMergedVideoPath());
-                a.show();
-            });
-        });
-    }
+//    private void handleMergeAction() {
+//        String code = view.searchTrackingCode.getText().trim();
+//        if (code.isEmpty()) return;
+//
+//        view.mergeVideoBtn.setText("⏳ Đang ghép...");
+//        view.mergeVideoBtn.setDisable(true);
+//
+//        javafx.scene.media.MediaPlayer masterPlayer = playerPano != null ? playerPano : playerQr;
+//        if (masterPlayer != null && masterPlayer.getStatus() == javafx.scene.media.MediaPlayer.Status.PLAYING) {
+//            togglePlayback();
+//        }
+//
+//        OrderRecord tempRecord = new OrderRecord(code);
+//        String dir = System.getProperty("user.dir") + java.io.File.separator + "videos" + java.io.File.separator;
+//        tempRecord.setPanoVideoPath(dir + code + "_pano.mp4");
+//        tempRecord.setQrVideoPath(dir + code + "_qr.mp4");
+//
+//        videoRecorder.mergeDualCamVideos(tempRecord, () -> {
+//            Platform.runLater(() -> {
+//                view.mergeVideoBtn.setText("✂️ Ghép thành 1 File");
+//                view.mergeVideoBtn.setDisable(false);
+//
+//                java.io.File fileMerged = new java.io.File(tempRecord.getMergedVideoPath());
+//                if (fileMerged.exists()) {
+//                    boolean alreadyHasMerged = view.pathBoxContainer.getChildren().stream()
+//                            .filter(node -> node instanceof javafx.scene.control.Hyperlink)
+//                            .anyMatch(node -> ((javafx.scene.control.Hyperlink) node).getText().contains("File Đã Ghép"));
+//                    if (!alreadyHasMerged) {
+//                        view.pathBoxContainer.getChildren().add(createFileLink("✂️ File Đã Ghép", fileMerged));
+//                    }
+//                }
+//
+//                Alert a = new Alert(Alert.AlertType.INFORMATION, "Ghép thành công! Đã lưu tại:\n" + tempRecord.getMergedVideoPath());
+//                a.show();
+//            });
+//        });
+//    }
 
     private void stopCameraSystem() {
         isSystemRunning = false;
